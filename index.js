@@ -1107,11 +1107,11 @@ server.tool(
     lines.push("## Instructions");
     lines.push("");
     lines.push("For each observation, decide:");
-    lines.push("- **PROMOTE** — confirmed fact, use `rebar_promote` with the observation index and target section");
-    lines.push("- **DISCARD** — stale or already captured, use `rebar_discard` with the index and reason");
+    lines.push("- **PROMOTE** — confirmed fact → rebar_promote(project, index, section)");
+    lines.push("- **DISCARD** — stale or duplicate → rebar_discard(project, index, reason)");
     lines.push("- **DEFER** — can't verify yet, leave it");
     lines.push("");
-    lines.push("Process them in order. The indices shift as you remove items, so work from highest index to lowest if discarding multiple.");
+    lines.push("Work from highest index to lowest when removing multiple (indices shift).");
 
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
@@ -1135,11 +1135,14 @@ server.tool(
 
 server.tool(
   "rebar_wiki_ingest",
-  "Read a specific file from raw/ and return its contents for the AI to process into wiki knowledge. The AI should then call rebar_wiki_write to save pages and rebar_wiki_move_processed to archive the source.",
+  "Ingest a file from raw/ into a wiki page. Reads the file, writes the wiki page, updates the index, and moves the source to raw/processed/ — all in one call. If no filename given, lists available files.",
   {
-    filename: z.string().optional().describe("Specific file to ingest from raw/. If omitted, lists available files."),
+    filename: z.string().optional().describe("File to ingest from raw/. Omit to list available files."),
+    category: z.string().optional().describe("Wiki category: platform, patterns, decisions, clients, people. Required when ingesting."),
+    page_name: z.string().optional().describe("Page name in kebab-case (without .md). Required when ingesting."),
+    page_content: z.string().optional().describe("Full markdown content for the wiki page. If omitted, the raw file content is used as-is with a source footer added."),
   },
-  async ({ filename }) => {
+  async ({ filename, category, page_name, page_content }) => {
     const rawDir = path.join(REBAR_ROOT, "raw");
     if (!fs.existsSync(rawDir)) {
       return { content: [{ type: "text", text: "No raw/ directory found. Run rebar_init first." }] };
@@ -1156,30 +1159,79 @@ server.tool(
       if (available.length === 0) {
         return { content: [{ type: "text", text: "No files in raw/. Drop files there first." }] };
       }
-      return { content: [{ type: "text", text: `Files ready for ingestion:\n${available.map(f => `- ${f}`).join("\n")}\n\nCall rebar_wiki_ingest with a specific filename to process it.` }] };
+      return { content: [{ type: "text", text: `Files ready for ingestion:\n${available.map(f => `- ${f}`).join("\n")}\n\nCall rebar_wiki_ingest with filename, category, and page_name to process.` }] };
     }
 
-    // Read the specific file
+    if (!category || !page_name) {
+      // Read and return file so AI can decide category/page_name
+      const filePath = path.join(rawDir, filename);
+      if (!fs.existsSync(filePath)) {
+        return { content: [{ type: "text", text: `File raw/${filename} not found.` }], isError: true };
+      }
+      const content = fs.readFileSync(filePath, "utf8");
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `# raw/${filename}`,
+            "",
+            content.substring(0, 15000),
+            "",
+            "---",
+            "Call rebar_wiki_ingest again with category (platform/patterns/decisions/clients/people), page_name (kebab-case), and optionally page_content to complete ingestion.",
+          ].join("\n"),
+        }],
+      };
+    }
+
+    // Full ingestion: read source, write wiki page, update index, move to processed
     const filePath = path.join(rawDir, filename);
     if (!fs.existsSync(filePath)) {
       return { content: [{ type: "text", text: `File raw/${filename} not found.` }], isError: true };
     }
 
-    const content = fs.readFileSync(filePath, "utf8");
     const today = new Date().toISOString().split("T")[0];
+    const rawContent = fs.readFileSync(filePath, "utf8");
+
+    // Use provided page_content or wrap raw content
+    const finalContent = page_content || [
+      `# ${page_name.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}`,
+      "",
+      `#${category}`,
+      "",
+      rawContent.substring(0, 10000),
+      "",
+      "---",
+      `Source: raw/${filename} | Ingested: ${today}`,
+    ].join("\n");
+
+    // Write wiki page
+    const wikiDir = path.join(REBAR_ROOT, "wiki", category);
+    fs.mkdirSync(wikiDir, { recursive: true });
+    const pagePath = path.join(wikiDir, `${page_name}.md`);
+    const isUpdate = fs.existsSync(pagePath);
+    fs.writeFileSync(pagePath, finalContent, "utf8");
+
+    // Update index
+    const indexPath = path.join(REBAR_ROOT, "wiki", "index.md");
+    if (fs.existsSync(indexPath)) {
+      const index = fs.readFileSync(indexPath, "utf8");
+      if (!index.includes(`[[${page_name}]]`)) {
+        const firstLine = finalContent.split("\n").find(l => l.trim() && !l.startsWith("#") && !l.startsWith("---") && !l.startsWith("```"));
+        const summary = (firstLine || "").trim().substring(0, 80);
+        fs.appendFileSync(indexPath, `\n| [[${page_name}]] | ${category} | ${summary} |`, "utf8");
+      }
+    }
+
+    // Move to processed
+    const processedDir = path.join(rawDir, "processed");
+    fs.mkdirSync(processedDir, { recursive: true });
+    fs.renameSync(filePath, path.join(processedDir, filename));
 
     return {
       content: [{
         type: "text",
-        text: [
-          `# Source: raw/${filename}`,
-          "",
-          content.substring(0, 15000),
-          "",
-          "---",
-          "",
-          `Create wiki pages from this content using rebar_wiki_write (categories: platform, patterns, decisions, clients, people). One concept per page. Then call rebar_wiki_move_processed with filename "${filename}" to archive it.`,
-        ].join("\n"),
+        text: `Done. ${isUpdate ? "Updated" : "Created"} wiki/${category}/${page_name}.md from raw/${filename}. Source moved to raw/processed/.`,
       }],
     };
   }
@@ -1335,7 +1387,7 @@ server.tool(
           "",
           "---",
           "",
-          "Fill in the Implementation Plan, Files to Create/Modify, and Success Criteria sections. Then use rebar_build to implement it.",
+          "Fill in the Implementation Plan, Files to Create/Modify, and Success Criteria sections.",
         ].join("\n"),
       }],
     };
@@ -1344,7 +1396,7 @@ server.tool(
 
 server.tool(
   "rebar_build",
-  "Read a plan from specs/ and return it as implementation instructions. After building, the AI should call rebar_observe to capture what it learned.",
+  "Read a plan from specs/ and return it as implementation instructions.",
   {
     project: z.string().describe("Project name"),
     plan_name: z.string().describe("Plan filename without .md (e.g. 'add-auth')"),
@@ -1387,7 +1439,7 @@ server.tool(
           "",
           "---",
           "",
-          "Implement the plan above. After building, call rebar_observe for any gotchas, patterns, or decisions discovered during implementation.",
+          "Implement the plan above.",
         ].join("\n"),
       }],
     };
