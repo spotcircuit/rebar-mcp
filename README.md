@@ -94,8 +94,9 @@ These replace the Claude Code slash commands. Your AI calls them directly.
 | `rebar_validate` | Check if an observation should be promoted, discarded, or deferred |
 | `rebar_search` | Search across all expertise files and wiki |
 | `rebar_diff` | Show what changed in expertise.yaml since last session (git diff) |
-| `rebar_promote` | Promote an observation into a target section |
-| `rebar_discard` | Discard a stale observation with a reason |
+| `rebar_resolve_observation` | Resolve an observation: promote to a section, discard, or defer |
+| `rebar_promote` | *(alias)* Promote an observation into a target section |
+| `rebar_discard` | *(alias)* Discard a stale observation with a reason |
 | `rebar_ingest` | List files in raw/ ready for ingestion |
 | `rebar_stats` | Dashboard: projects, observations, wiki pages, last updated |
 | `rebar_ingest_paperclip` | Ingest Paperclip agent run history into expertise.yaml and optionally wiki |

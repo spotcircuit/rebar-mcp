@@ -210,71 +210,174 @@ function findFileRecursive(dir, filename) {
   return null;
 }
 
-function searchAllContent(root, query) {
-  const results = [];
-  const lowerQuery = query.toLowerCase();
+// ---------------------------------------------------------------------------
+// FTS5 Full-Text Search
+// ---------------------------------------------------------------------------
+let ftsDb = null;
+let ftsIndexedAt = 0;
+const FTS_STALE_MS = 30000;
 
-  // Search expertise files
-  for (const proj of listProjects(root)) {
-    const content = readExpertise(root, proj.name);
-    if (content && content.toLowerCase().includes(lowerQuery)) {
-      // Extract matching lines with context
-      const lines = content.split("\n");
-      const matches = [];
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].toLowerCase().includes(lowerQuery)) {
-          const start = Math.max(0, i - 1);
-          const end = Math.min(lines.length - 1, i + 1);
-          matches.push(lines.slice(start, end + 1).join("\n"));
-        }
-      }
-      if (matches.length > 0) {
-        results.push({
-          source: `expertise: ${proj.type}/${proj.name}`,
-          matches: matches.slice(0, 5),
-        });
-      }
-    }
-  }
-
-  // Search wiki
-  const wikiDir = path.join(root, "wiki");
-  if (fs.existsSync(wikiDir)) {
-    searchDirForContent(wikiDir, lowerQuery, results, root);
-  }
-
-  return results;
+function initFtsDb() {
+  if (ftsDb) return ftsDb;
+  ftsDb = new Database(":memory:");
+  ftsDb.pragma("journal_mode = WAL");
+  ftsDb.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+      source,
+      title,
+      body,
+      tokenize='porter unicode61'
+    );
+  `);
+  return ftsDb;
 }
 
-function searchDirForContent(dir, query, results, root) {
+function collectWikiFiles(dir, root, files) {
+  if (!fs.existsSync(dir)) return;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      searchDirForContent(fullPath, query, results, root);
+      collectWikiFiles(fullPath, root, files);
     } else if (entry.name.endsWith(".md")) {
       try {
         const content = fs.readFileSync(fullPath, "utf8");
-        if (content.toLowerCase().includes(query)) {
-          const relPath = path.relative(path.join(root, "wiki"), fullPath);
-          const lines = content.split("\n");
-          const matches = [];
-          for (let i = 0; i < lines.length; i++) {
-            if (lines[i].toLowerCase().includes(query)) {
-              const start = Math.max(0, i - 1);
-              const end = Math.min(lines.length - 1, i + 1);
-              matches.push(lines.slice(start, end + 1).join("\n"));
-            }
-          }
-          if (matches.length > 0) {
-            results.push({
-              source: `wiki: ${relPath}`,
-              matches: matches.slice(0, 5),
-            });
-          }
-        }
+        const relPath = path.relative(path.join(root, "wiki"), fullPath);
+        const title = entry.name.replace(/\.md$/, "");
+        files.push({ source: `wiki: ${relPath}`, title, body: content });
       } catch (_) {}
     }
   }
+}
+
+function getLatestMtime(root) {
+  let latest = 0;
+  for (const proj of listProjects(root)) {
+    const projDir = resolveProjectDir(root, proj.name);
+    if (!projDir) continue;
+    const ep = path.join(projDir, "expertise.yaml");
+    try { latest = Math.max(latest, fs.statSync(ep).mtimeMs); } catch (_) {}
+  }
+  const wikiDir = path.join(root, "wiki");
+  if (fs.existsSync(wikiDir)) {
+    const checkDir = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fp = path.join(dir, entry.name);
+        if (entry.isDirectory()) { checkDir(fp); }
+        else if (entry.name.endsWith(".md")) {
+          try { latest = Math.max(latest, fs.statSync(fp).mtimeMs); } catch (_) {}
+        }
+      }
+    };
+    checkDir(wikiDir);
+  }
+  return latest;
+}
+
+function buildFtsIndex(root) {
+  const db = initFtsDb();
+  db.exec("DELETE FROM search_index");
+
+  const insert = db.prepare("INSERT INTO search_index (source, title, body) VALUES (?, ?, ?)");
+  const insertMany = db.transaction((docs) => {
+    for (const doc of docs) insert.run(doc.source, doc.title, doc.body);
+  });
+
+  const docs = [];
+
+  for (const proj of listProjects(root)) {
+    const content = readExpertise(root, proj.name);
+    if (content) {
+      docs.push({
+        source: `expertise: ${proj.type}/${proj.name}`,
+        title: `${proj.name} expertise`,
+        body: content,
+      });
+    }
+  }
+
+  const wikiDir = path.join(root, "wiki");
+  if (fs.existsSync(wikiDir)) {
+    const wikiFiles = [];
+    collectWikiFiles(wikiDir, root, wikiFiles);
+    for (const wf of wikiFiles) {
+      docs.push({ source: wf.source, title: wf.title, body: wf.body });
+    }
+  }
+
+  insertMany(docs);
+  ftsIndexedAt = Date.now();
+  return docs.length;
+}
+
+function ensureFtsIndex(root) {
+  initFtsDb();
+  if (ftsIndexedAt === 0) {
+    buildFtsIndex(root);
+    return;
+  }
+  const now = Date.now();
+  if (now - ftsIndexedAt > FTS_STALE_MS) {
+    const latestMtime = getLatestMtime(root);
+    if (latestMtime > ftsIndexedAt) {
+      buildFtsIndex(root);
+    } else {
+      ftsIndexedAt = now;
+    }
+  }
+}
+
+function searchFts(root, query) {
+  ensureFtsIndex(root);
+  const db = initFtsDb();
+
+  const safeQuery = query.replace(/"/g, '""');
+  const ftsQuery = `"${safeQuery}"`;
+
+  const stmt = db.prepare(`
+    SELECT source, title,
+           snippet(search_index, 2, '>>>', '<<<', '...', 40) AS snippet,
+           rank
+    FROM search_index
+    WHERE search_index MATCH ?
+    ORDER BY rank
+    LIMIT 20
+  `);
+
+  try {
+    const rows = stmt.all(ftsQuery);
+    if (rows.length > 0) return rows;
+  } catch (_) {}
+
+  // Fallback: space-separated terms
+  const terms = query.trim().split(/\s+/).map(t => t.replace(/"/g, '""')).filter(Boolean);
+  if (terms.length === 0) return [];
+  const termQuery = terms.map(t => `"${t}"`).join(" ");
+
+  try {
+    return stmt.all(termQuery);
+  } catch (_) {
+    return [];
+  }
+}
+
+function searchAllContent(root, query) {
+  const rows = searchFts(root, query);
+  if (rows.length === 0) return [];
+
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.source)) {
+      grouped.set(row.source, { source: row.source, matches: [], rank: row.rank });
+    }
+    const snippet = row.snippet.replace(/>>>/g, "**").replace(/<<</g, "**");
+    grouped.get(row.source).matches.push(snippet);
+  }
+
+  return Array.from(grouped.values()).map(g => ({
+    source: g.source,
+    matches: g.matches.slice(0, 5),
+    rank: g.rank,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -515,25 +618,26 @@ server.tool(
 
 server.tool(
   "rebar_search",
-  "Search across all expertise files and wiki for a term. Returns compact results. Use rebar_detail for full content.",
+  "Full-text search (FTS5) across all expertise files and wiki. Returns ranked results with relevance scoring and snippet context. Use rebar_detail for full content.",
   {
-    query: z.string().describe("Search term"),
+    query: z.string().describe("Search term or phrase"),
   },
   async ({ query }) => {
     const results = searchAllContent(REBAR_ROOT, query);
     if (results.length === 0) {
       return { content: [{ type: "text", text: `No results found for '${query}'.` }] };
     }
-    const lines = results.map((r) => {
+    const lines = results.map((r, i) => {
+      const relevance = Math.min(100, Math.round(Math.abs(r.rank || 0) * 100) / 100);
       const firstMatch = r.matches[0] || "";
-      const snippet = firstMatch.split("\n")[0].substring(0, 120);
-      const extra = r.matches.length > 1 ? ` (+${r.matches.length - 1} more)` : "";
+      const snippet = firstMatch.substring(0, 150);
+      const extra = r.matches.length > 1 ? ` (+${r.matches.length - 1} more matches)` : "";
       const sourceType = r.source.startsWith("expertise:") ? "expertise" : "wiki";
       const sourceId = r.source.replace(/^(expertise|wiki):\s*/, "").replace(/^(apps|clients|tools)\//, "").replace(/\.md$/, "");
-      return `- **${r.source}**: ${snippet}${extra} → rebar_detail(type='${sourceType}', id='${sourceId}')`;
+      return `${i + 1}. **${r.source}** (relevance: ${relevance})\n   ${snippet}${extra}\n   → \`rebar_detail(type='${sourceType}', id='${sourceId}')\``;
     });
-    lines.push("");
-    lines.push("_Use rebar_detail to get full content for any result._");
+    lines.unshift(`**${results.length} results for "${query}"** (ranked by relevance)\n`);
+    lines.push("\n_Use rebar_detail to get full content for any result._");
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
