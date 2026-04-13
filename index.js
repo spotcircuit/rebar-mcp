@@ -773,6 +773,509 @@ server.tool(
   }
 );
 
+// --- Tools: Full Rebar Workflow (no Claude Code required) ---
+
+server.tool(
+  "rebar_init",
+  "Scaffold rebar into the current project directory (creates CLAUDE.md, apps/, clients/, tools/, wiki/, raw/)",
+  {},
+  async () => {
+    const root = REBAR_ROOT;
+    const created = [];
+
+    // Create directories
+    for (const dir of [
+      "apps/_templates", "clients/_templates", "tools/_templates",
+      "wiki", "raw/processed", "system/drafts",
+    ]) {
+      const fullDir = path.join(root, dir);
+      if (!fs.existsSync(fullDir)) {
+        fs.mkdirSync(fullDir, { recursive: true });
+        created.push(dir);
+      }
+    }
+
+    // Create CLAUDE.md if missing
+    const claudeMd = path.join(root, "CLAUDE.md");
+    if (!fs.existsSync(claudeMd)) {
+      fs.writeFileSync(claudeMd, [
+        "# Project",
+        "",
+        "Structural memory powered by Rebar. Knowledge persists across sessions via expertise.yaml, wiki/, and memory.",
+        "",
+        "Based on Andrej Karpathy's LLM Wiki pattern, extended with structured operational data and behavioral memory.",
+        "",
+        "## Directory Structure",
+        "",
+        "- `clients/` — external engagements",
+        "- `apps/` — internal tools and products",
+        "- `tools/` — infrastructure integrations",
+        "- `wiki/` — knowledge wiki",
+        "- `raw/` — drop zone for file ingestion",
+        "",
+      ].join("\n"), "utf8");
+      created.push("CLAUDE.md");
+    }
+
+    // Create expertise template if missing
+    const expTemplate = path.join(root, "clients/_templates/expertise.yaml");
+    if (!fs.existsSync(expTemplate)) {
+      fs.writeFileSync(expTemplate, [
+        "# {name}/expertise.yaml",
+        "meta:",
+        "  name: {name}",
+        "  last_updated: {date}",
+        "",
+        "architecture: {}",
+        "known_issues: []",
+        "implementation_patterns: {}",
+        "unvalidated_observations: []",
+        "",
+      ].join("\n"), "utf8");
+      created.push("clients/_templates/expertise.yaml");
+    }
+
+    if (created.length === 0) {
+      return { content: [{ type: "text", text: "Rebar is already initialized in this directory." }] };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `Rebar initialized. Created:\n${created.map(c => `  - ${c}`).join("\n")}\n\nNext: run rebar_discover to scan your codebase and generate expertise.yaml.`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_discover",
+  "Scan the codebase and generate an expertise.yaml for a project. Returns structured project analysis for the AI to review and save.",
+  {
+    project: z.string().describe("Project name to create under apps/ (e.g. 'my-app')"),
+  },
+  async ({ project }) => {
+    const root = REBAR_ROOT;
+    const projDir = path.join(root, "apps", project);
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.mkdirSync(path.join(projDir, "specs"), { recursive: true });
+
+    // Scan the codebase for context
+    const analysis = [];
+
+    // 1. Package files
+    for (const pkg of ["package.json", "requirements.txt", "Cargo.toml", "go.mod", "pyproject.toml", "Gemfile"]) {
+      const pkgPath = path.join(root, pkg);
+      if (fs.existsSync(pkgPath)) {
+        try {
+          const content = fs.readFileSync(pkgPath, "utf8");
+          analysis.push({ file: pkg, content: content.substring(0, 3000) });
+        } catch (_) {}
+      }
+    }
+
+    // 2. README
+    for (const readme of ["README.md", "readme.md", "README.rst"]) {
+      const readmePath = path.join(root, readme);
+      if (fs.existsSync(readmePath)) {
+        try {
+          analysis.push({ file: readme, content: fs.readFileSync(readmePath, "utf8").substring(0, 3000) });
+        } catch (_) {}
+        break;
+      }
+    }
+
+    // 3. Directory structure (top 3 levels)
+    const tree = [];
+    function walkDir(dir, depth, maxDepth) {
+      if (depth >= maxDepth) return;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "__pycache__" || entry.name === ".git" || entry.name === "venv" || entry.name === ".venv") continue;
+          const relPath = path.relative(root, path.join(dir, entry.name));
+          tree.push({ path: relPath, type: entry.isDirectory() ? "dir" : "file" });
+          if (entry.isDirectory()) walkDir(path.join(dir, entry.name), depth + 1, maxDepth);
+        }
+      } catch (_) {}
+    }
+    walkDir(root, 0, 3);
+
+    // 4. Config files
+    for (const config of ["tsconfig.json", "vite.config.ts", "vite.config.js", "next.config.js", "next.config.ts", "webpack.config.js", "tailwind.config.js", "tailwind.config.ts", "docker-compose.yml", "Dockerfile", ".env.example"]) {
+      const configPath = path.join(root, config);
+      if (fs.existsSync(configPath)) {
+        try {
+          analysis.push({ file: config, content: fs.readFileSync(configPath, "utf8").substring(0, 1500) });
+        } catch (_) {}
+      }
+    }
+
+    // 5. Entry points
+    for (const entry of ["src/index.ts", "src/index.js", "src/main.ts", "src/main.py", "app/page.tsx", "app/layout.tsx", "main.py", "main.go", "src/lib.rs"]) {
+      const entryPath = path.join(root, entry);
+      if (fs.existsSync(entryPath)) {
+        try {
+          analysis.push({ file: entry, content: fs.readFileSync(entryPath, "utf8").substring(0, 2000) });
+        } catch (_) {}
+      }
+    }
+
+    // Create initial expertise.yaml
+    const today = new Date().toISOString().split("T")[0];
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    if (!fs.existsSync(expertisePath)) {
+      fs.writeFileSync(expertisePath, [
+        `# ${project} — expertise.yaml`,
+        `# Generated by rebar_discover on ${today}`,
+        `# Review and fill in the sections below, then run rebar_improve to validate observations.`,
+        "",
+        `app: ${project}`,
+        `last_updated: "${today}"`,
+        "",
+        "architecture: {}",
+        "  # TODO: Fill in after reviewing the codebase scan below",
+        "",
+        "api_gotchas: []",
+        "",
+        "key_decisions: []",
+        "",
+        "known_issues: []",
+        "",
+        "implementation_patterns: {}",
+        "",
+        "unvalidated_observations:",
+        `  - "Initial rebar_discover scan on ${today}. Review the codebase analysis and fill in architecture, gotchas, and decisions."`,
+        "",
+      ].join("\n"), "utf8");
+    }
+
+    // Create notes.md
+    const notesPath = path.join(projDir, "notes.md");
+    if (!fs.existsSync(notesPath)) {
+      fs.writeFileSync(notesPath, `# ${project} — Notes\n\n## ${today}: Initial Discovery\n\nRebar discover ran. Review expertise.yaml and fill in architecture details.\n`, "utf8");
+    }
+
+    // Build response for the AI
+    const fileList = tree.filter(t => t.type === "file").map(t => t.path).join("\n");
+    const dirList = tree.filter(t => t.type === "dir").map(t => t.path + "/").join("\n");
+    const fileContents = analysis.map(a => `### ${a.file}\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
+
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `# Rebar Discover: ${project}`,
+          "",
+          `Created: apps/${project}/expertise.yaml`,
+          `Created: apps/${project}/notes.md`,
+          "",
+          "## Codebase Scan",
+          "",
+          "### Directory Structure",
+          "```",
+          dirList || "(empty)",
+          "```",
+          "",
+          "### Files",
+          "```",
+          fileList || "(empty)",
+          "```",
+          "",
+          "## Key Files",
+          "",
+          fileContents || "(no key files found)",
+          "",
+          "---",
+          "",
+          "## What to do now",
+          "",
+          `Based on the scan above, fill in \`apps/${project}/expertise.yaml\` with:`,
+          "1. **architecture** — framework, language, database, hosting, key components",
+          "2. **api_gotchas** — things that are non-obvious or could trip someone up",
+          "3. **key_decisions** — why certain tech choices were made",
+          "4. **known_issues** — bugs, tech debt, workarounds",
+          "",
+          "Use `rebar_write_expertise` to save your analysis, or edit the file directly.",
+          "Then run `rebar_improve` periodically to validate observations against live code.",
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_write_expertise",
+  "Write or update an expertise.yaml file for a project",
+  {
+    project: z.string().describe("Project name"),
+    content: z.string().describe("Full YAML content to write to expertise.yaml"),
+  },
+  async ({ project, content }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      // Try to create under apps/
+      const newDir = path.join(REBAR_ROOT, "apps", project);
+      fs.mkdirSync(newDir, { recursive: true });
+      fs.writeFileSync(path.join(newDir, "expertise.yaml"), content, "utf8");
+      return { content: [{ type: "text", text: `Created apps/${project}/expertise.yaml` }] };
+    }
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    // Validate YAML before writing
+    try {
+      yaml.load(content);
+    } catch (e) {
+      return { content: [{ type: "text", text: `Invalid YAML: ${e.message}. Fix and try again.` }], isError: true };
+    }
+    fs.writeFileSync(expertisePath, content, "utf8");
+    return { content: [{ type: "text", text: `Updated ${path.relative(REBAR_ROOT, expertisePath)} (${content.split("\n").length} lines)` }] };
+  }
+);
+
+server.tool(
+  "rebar_improve",
+  "Read expertise.yaml and return all unvalidated observations with project context so the AI can decide what to promote, discard, or defer",
+  {
+    project: z.string().describe("Project name"),
+  },
+  async ({ project }) => {
+    const data = parseExpertise(REBAR_ROOT, project);
+    if (!data) {
+      return { content: [{ type: "text", text: `Project '${project}' not found or has no expertise.yaml.` }], isError: true };
+    }
+
+    const observations = data.unvalidated_observations || [];
+    if (observations.length === 0) {
+      return { content: [{ type: "text", text: `No unvalidated observations for '${project}'. Nothing to improve.` }] };
+    }
+
+    // Gather current sections for context
+    const sections = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key === "unvalidated_observations") continue;
+      if (Array.isArray(value)) {
+        sections[key] = `${value.length} entries`;
+      } else if (typeof value === "object" && value !== null) {
+        sections[key] = Object.keys(value).join(", ");
+      } else {
+        sections[key] = String(value).substring(0, 100);
+      }
+    }
+
+    // Check git for recent changes
+    let recentChanges = "";
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (projDir) {
+      try {
+        const relPath = path.relative(REBAR_ROOT, projDir);
+        recentChanges = execSync(`git log --oneline -10 -- "${relPath}"`, { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 });
+      } catch (_) {}
+    }
+
+    const lines = [
+      `# Improve: ${project}`,
+      "",
+      `**${observations.length} unvalidated observations to review:**`,
+      "",
+    ];
+
+    observations.forEach((obs, i) => {
+      const obsText = typeof obs === "string" ? obs : JSON.stringify(obs);
+      lines.push(`${i}. ${obsText}`);
+    });
+
+    lines.push("");
+    lines.push("## Current expertise sections");
+    lines.push("");
+    for (const [key, summary] of Object.entries(sections)) {
+      lines.push(`- **${key}:** ${summary}`);
+    }
+
+    if (recentChanges) {
+      lines.push("");
+      lines.push("## Recent git activity");
+      lines.push("```");
+      lines.push(recentChanges.trim());
+      lines.push("```");
+    }
+
+    lines.push("");
+    lines.push("## Instructions");
+    lines.push("");
+    lines.push("For each observation, decide:");
+    lines.push("- **PROMOTE** — confirmed fact, use `rebar_promote` with the observation index and target section");
+    lines.push("- **DISCARD** — stale or already captured, use `rebar_discard` with the index and reason");
+    lines.push("- **DEFER** — can't verify yet, leave it");
+    lines.push("");
+    lines.push("Process them in order. The indices shift as you remove items, so work from highest index to lowest if discarding multiple.");
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+server.tool(
+  "rebar_brief_tool",
+  "Generate a standup/handoff summary from a project's expertise.yaml (returns formatted brief)",
+  {
+    project: z.string().describe("Project name"),
+  },
+  async ({ project }) => {
+    const data = parseExpertise(REBAR_ROOT, project);
+    if (!data) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+    const brief = generateBrief(data);
+    return { content: [{ type: "text", text: brief }] };
+  }
+);
+
+server.tool(
+  "rebar_wiki_ingest",
+  "Scan raw/ for unprocessed files, return their contents so the AI can create wiki pages. After processing, call rebar_wiki_write for each page and rebar_wiki_move_processed for each source file.",
+  {},
+  async () => {
+    const rawDir = path.join(REBAR_ROOT, "raw");
+    if (!fs.existsSync(rawDir)) {
+      return { content: [{ type: "text", text: "No raw/ directory found." }] };
+    }
+
+    const files = [];
+    for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) continue;
+      if (entry.name.startsWith(".")) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (![".md", ".txt", ".html", ".htm"].includes(ext)) continue;
+      const fullPath = path.join(rawDir, entry.name);
+      try {
+        const content = fs.readFileSync(fullPath, "utf8");
+        const stat = fs.statSync(fullPath);
+        files.push({
+          name: entry.name,
+          size: stat.size,
+          content: content.substring(0, 10000),
+        });
+      } catch (_) {}
+    }
+
+    if (files.length === 0) {
+      return { content: [{ type: "text", text: "No files to process in raw/." }] };
+    }
+
+    // Return file contents for the AI to process
+    const output = [
+      `# Wiki Ingest: ${files.length} file(s) to process`,
+      "",
+      "For each file, create wiki pages using `rebar_wiki_write`. Then move the source using `rebar_wiki_move_processed`.",
+      "",
+      "## Wiki page format",
+      "",
+      "```markdown",
+      "# Page Title",
+      "",
+      "#tag1 #tag2 #category",
+      "",
+      "Content here. One concept per page.",
+      "",
+      "## Related",
+      "",
+      "- [[other-page]]",
+      "",
+      "---",
+      "Source: raw/filename.md | Ingested: YYYY-MM-DD",
+      "```",
+      "",
+      "## Categories: platform/, patterns/, decisions/, clients/, people/",
+      "",
+    ];
+
+    for (const file of files) {
+      output.push(`---`);
+      output.push(`## ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+      output.push("");
+      output.push(file.content);
+      output.push("");
+    }
+
+    return { content: [{ type: "text", text: output.join("\n") }] };
+  }
+);
+
+server.tool(
+  "rebar_wiki_write",
+  "Write a wiki page to wiki/{category}/{page-name}.md",
+  {
+    category: z.string().describe("Wiki category (platform, patterns, decisions, clients, people)"),
+    page_name: z.string().describe("Page filename without .md (kebab-case)"),
+    content: z.string().describe("Full markdown content for the wiki page"),
+  },
+  async ({ category, page_name, content }) => {
+    const wikiDir = path.join(REBAR_ROOT, "wiki", category);
+    fs.mkdirSync(wikiDir, { recursive: true });
+    const pagePath = path.join(wikiDir, `${page_name}.md`);
+    const isUpdate = fs.existsSync(pagePath);
+    fs.writeFileSync(pagePath, content, "utf8");
+
+    // Update index.md
+    const indexPath = path.join(REBAR_ROOT, "wiki", "index.md");
+    if (fs.existsSync(indexPath)) {
+      const index = fs.readFileSync(indexPath, "utf8");
+      if (!index.includes(`[[${page_name}]]`)) {
+        // Extract first line as summary
+        const firstLine = content.split("\n").find(l => l.trim() && !l.startsWith("#") && !l.startsWith("---"));
+        const summary = (firstLine || "").replace(/^#.*/, "").trim().substring(0, 80);
+        const newRow = `| [[${page_name}]] | ${category} | ${summary} |`;
+        fs.appendFileSync(indexPath, "\n" + newRow, "utf8");
+      }
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `${isUpdate ? "Updated" : "Created"} wiki/${category}/${page_name}.md`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_wiki_move_processed",
+  "Move a processed raw file to raw/processed/",
+  {
+    filename: z.string().describe("Filename to move (e.g. 'meeting-notes.md')"),
+  },
+  async ({ filename }) => {
+    const src = path.join(REBAR_ROOT, "raw", filename);
+    const destDir = path.join(REBAR_ROOT, "raw", "processed");
+    fs.mkdirSync(destDir, { recursive: true });
+    const dest = path.join(destDir, filename);
+    if (!fs.existsSync(src)) {
+      return { content: [{ type: "text", text: `File raw/${filename} not found.` }], isError: true };
+    }
+    fs.renameSync(src, dest);
+    return { content: [{ type: "text", text: `Moved raw/${filename} → raw/processed/${filename}` }] };
+  }
+);
+
+server.tool(
+  "rebar_read_file",
+  "Read any file in the rebar project (for AI to inspect code, configs, etc.)",
+  {
+    file_path: z.string().describe("Relative path from project root (e.g. 'src/index.ts', 'apps/my-app/expertise.yaml')"),
+  },
+  async ({ file_path }) => {
+    const fullPath = path.join(REBAR_ROOT, file_path);
+    if (!fs.existsSync(fullPath)) {
+      return { content: [{ type: "text", text: `File not found: ${file_path}` }], isError: true };
+    }
+    try {
+      const content = fs.readFileSync(fullPath, "utf8");
+      return { content: [{ type: "text", text: content.substring(0, 50000) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error reading ${file_path}: ${e.message}` }], isError: true };
+    }
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
