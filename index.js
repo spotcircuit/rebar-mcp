@@ -2231,6 +2231,88 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Git Hooks — install / uninstall rebar post-commit hook
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "rebar_install_hooks",
+  "Install the rebar post-commit git hook into a repository. The hook watches commits for changes in apps/, clients/, tools/ and auto-appends observations to the matching expertise.yaml.",
+  {
+    repo_path: z.string().optional().describe("Path to the git repository. Defaults to the rebar root directory."),
+  },
+  async ({ repo_path }) => {
+    const root = REBAR_ROOT;
+    const targetRepo = repo_path || root;
+
+    // Verify it's a git repo
+    const gitDir = path.join(targetRepo, ".git");
+    if (!fs.existsSync(gitDir)) {
+      return { content: [{ type: "text", text: `Not a git repository: ${targetRepo}` }], isError: true };
+    }
+
+    const hooksDir = path.join(gitDir, "hooks");
+    if (!fs.existsSync(hooksDir)) {
+      fs.mkdirSync(hooksDir, { recursive: true });
+    }
+
+    const destPath = path.join(hooksDir, "post-commit");
+    const srcPath = path.join(__dirname, "hooks", "post-commit");
+
+    if (!fs.existsSync(srcPath)) {
+      return { content: [{ type: "text", text: `Hook source not found at ${srcPath}. Reinstall rebar-mcp.` }], isError: true };
+    }
+
+    // Check if a post-commit hook already exists (not ours)
+    if (fs.existsSync(destPath)) {
+      const existing = fs.readFileSync(destPath, "utf8");
+      if (!existing.includes("Rebar post-commit hook")) {
+        return {
+          content: [{ type: "text", text: `A post-commit hook already exists at ${destPath} and is not a rebar hook. Back it up manually before installing.` }],
+          isError: true,
+        };
+      }
+    }
+
+    // Copy the hook
+    const hookContent = fs.readFileSync(srcPath, "utf8");
+    fs.writeFileSync(destPath, hookContent, { mode: 0o755 });
+
+    return {
+      content: [{ type: "text", text: `Rebar post-commit hook installed at ${destPath}.\n\nThe hook will auto-append observations to expertise.yaml when commits touch files under apps/, clients/, or tools/.` }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_uninstall_hooks",
+  "Remove the rebar post-commit git hook from a repository. Only removes the hook if it was installed by rebar.",
+  {
+    repo_path: z.string().optional().describe("Path to the git repository. Defaults to the rebar root directory."),
+  },
+  async ({ repo_path }) => {
+    const root = REBAR_ROOT;
+    const targetRepo = repo_path || root;
+
+    const hookPath = path.join(targetRepo, ".git", "hooks", "post-commit");
+
+    if (!fs.existsSync(hookPath)) {
+      return { content: [{ type: "text", text: `No post-commit hook found at ${hookPath}. Nothing to remove.` }] };
+    }
+
+    const content = fs.readFileSync(hookPath, "utf8");
+    if (!content.includes("Rebar post-commit hook")) {
+      return {
+        content: [{ type: "text", text: `The post-commit hook at ${hookPath} is not a rebar hook. Not removing it.` }],
+        isError: true,
+      };
+    }
+
+    fs.unlinkSync(hookPath);
+    return { content: [{ type: "text", text: `Rebar post-commit hook removed from ${hookPath}.` }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 async function main() {

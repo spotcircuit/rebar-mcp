@@ -65,40 +65,59 @@ npx @spotcircuit/rebar-mcp
 | `rebar://commands` | List all available slash commands with descriptions |
 | `rebar://gotchas/{project}` | API gotchas from a project's expertise.yaml |
 
-### Tools — Core Workflow
+### Tools — 5 Actions
 
-These replace the Claude Code slash commands. Your AI calls them directly.
+Your AI calls these directly. Five verbs cover everything:
 
-| Tool | Replaces | Description |
-|---|---|---|
-| `rebar_install` | — | Auto-detect editors and write MCP config for each (one-command setup) |
-| `rebar_init` | `npx create-rebar` | Scaffold rebar into the current project |
-| `rebar_discover` | `/discover` | Scan codebase, generate expertise.yaml with project analysis |
-| `rebar_plan` | `/plan` | Create an implementation plan, saved to specs/ |
-| `rebar_build` | `/build` | Read a plan from specs/ and return it as build instructions |
-| `rebar_improve` | `/improve` | Review unvalidated observations with context for promote/discard/defer |
-| `rebar_brief_tool` | `/brief` | Generate a standup/handoff summary |
-| `rebar_write_expertise` | — | Write or update a project's expertise.yaml (validates YAML) |
-| `rebar_wiki_ingest` | `/wiki-ingest` | Read a raw/ file and return contents for wiki processing |
-| `rebar_wiki_write` | — | Write a wiki page to wiki/{category}/{page}.md |
-| `rebar_wiki_move_processed` | — | Move a processed raw file to raw/processed/ |
-| `rebar_read_file` | — | Read any file in the project |
-| `rebar_write_file` | — | Write any file in the project |
-
-### Tools — Knowledge Management
+#### 🔧 Setup — Get rebar running
 
 | Tool | Description |
 |---|---|
-| `rebar_list_projects` | List all projects (apps/ + clients/ + tools/) |
+| `rebar_install` | Auto-detect editors and write MCP config for each |
+| `rebar_init` | Scaffold rebar into the current project |
+
+#### 📖 Learn — Build project knowledge
+
+| Tool | Description |
+|---|---|
+| `rebar_discover` | Scan codebase, generate expertise.yaml with project analysis |
 | `rebar_observe` | Append an observation to unvalidated_observations |
-| `rebar_validate` | Check if an observation should be promoted, discarded, or deferred |
-| `rebar_search` | Search across all expertise files and wiki |
-| `rebar_diff` | Show what changed in expertise.yaml since last session (git diff) |
+| `rebar_improve` | Review unvalidated observations — promote, discard, or defer |
+| `rebar_validate` | Check if a single observation should be promoted, discarded, or deferred |
 | `rebar_resolve_observation` | Resolve an observation: promote to a section, discard, or defer |
 | `rebar_promote` | *(alias)* Promote an observation into a target section |
 | `rebar_discard` | *(alias)* Discard a stale observation with a reason |
+
+#### 🛠 Work — Plan, build, and write
+
+| Tool | Description |
+|---|---|
+| `rebar_plan` | Create an implementation plan, saved to specs/ |
+| `rebar_build` | Read a plan from specs/ and return it as build instructions |
+| `rebar_write_expertise` | Write or update a project's expertise.yaml (validates YAML) |
+| `rebar_wiki_ingest` | Read a raw/ file and return contents for wiki processing |
+| `rebar_wiki_write` | Write a wiki page to wiki/{category}/{page}.md |
+| `rebar_wiki_move_processed` | Move a processed raw file to raw/processed/ |
+| `rebar_read_file` | Read any file in the project |
+| `rebar_write_file` | Write any file in the project |
+
+#### 🔍 Know — Search and summarize
+
+| Tool | Description |
+|---|---|
+| `rebar_search` | Search across all expertise files and wiki |
+| `rebar_brief_tool` | Generate a standup/handoff summary |
+| `rebar_list_projects` | List all projects (apps/ + clients/ + tools/) |
 | `rebar_ingest` | List files in raw/ ready for ingestion |
+
+#### 📊 Admin — Track, debug, and automate
+
+| Tool | Description |
+|---|---|
 | `rebar_stats` | Dashboard: projects, observations, wiki pages, last updated |
+| `rebar_diff` | Show what changed in expertise.yaml since last session (git diff) |
+| `rebar_install_hooks` | Install rebar post-commit git hook (auto-appends observations on commit) |
+| `rebar_uninstall_hooks` | Remove the rebar post-commit git hook |
 | `rebar_ingest_paperclip` | Ingest Paperclip agent run history into expertise.yaml and optionally wiki |
 
 ## Editor Setup

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Rebar post-commit hook
+# Reads the latest commit diff, maps changed files to rebar projects
+# (apps/, clients/, tools/), and appends observations to expertise.yaml.
+#
+# Installed by rebar_install_hooks MCP tool.
+
+set -euo pipefail
+
+# Find rebar root: walk up from repo root looking for CLAUDE.md + apps/|clients/
+find_rebar_root() {
+  local dir
+  dir="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+  local max=20
+  while [ "$max" -gt 0 ]; do
+    if [ -f "$dir/CLAUDE.md" ] && { [ -d "$dir/apps" ] || [ -d "$dir/clients" ]; }; then
+      echo "$dir"
+      return 0
+    fi
+    local parent
+    parent="$(dirname "$dir")"
+    [ "$parent" = "$dir" ] && break
+    dir="$parent"
+    max=$((max - 1))
+  done
+  return 1
+}
+
+# Use REBAR_ROOT env var or auto-detect
+REBAR_ROOT="${REBAR_ROOT:-$(find_rebar_root 2>/dev/null || true)}"
+if [ -z "$REBAR_ROOT" ]; then
+  # Silently exit — not in a rebar project
+  exit 0
+fi
+
+# Get changed files from the latest commit
+CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null) || exit 0
+if [ -z "$CHANGED_FILES" ]; then
+  exit 0
+fi
+
+# Get commit metadata
+COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+COMMIT_MSG=$(git log -1 --format='%s' 2>/dev/null || echo "unknown")
+TIMESTAMP=$(date +%Y-%m-%d)
+
+# Map changed files to projects and collect observations
+declare -A PROJECT_FILES
+
+while IFS= read -r file; do
+  # Match apps/<name>/*, clients/<name>/*, tools/<name>/*
+  if [[ "$file" =~ ^(apps|clients|tools)/([^/]+)/ ]]; then
+    proj_type="${BASH_REMATCH[1]}"
+    proj_name="${BASH_REMATCH[2]}"
+    # Skip templates
+    [[ "$proj_name" == _* ]] && continue
+    key="${proj_type}/${proj_name}"
+    if [ -z "${PROJECT_FILES[$key]+x}" ]; then
+      PROJECT_FILES[$key]="$file"
+    else
+      PROJECT_FILES[$key]="${PROJECT_FILES[$key]}, $file"
+    fi
+  fi
+done <<< "$CHANGED_FILES"
+
+# Append observations to each affected project's expertise.yaml
+for key in "${!PROJECT_FILES[@]}"; do
+  expertise_path="${REBAR_ROOT}/${key}/expertise.yaml"
+  if [ ! -f "$expertise_path" ]; then
+    continue
+  fi
+
+  files="${PROJECT_FILES[$key]}"
+  # Count files for this project
+  file_count=$(echo "$files" | tr ',' '\n' | wc -l | tr -d ' ')
+
+  observation="[${TIMESTAMP}] [git-hook] commit ${COMMIT_HASH}: ${COMMIT_MSG} — ${file_count} file(s) changed: ${files}"
+
+  # Append to unvalidated_observations using python/yaml for safety
+  if command -v python3 &>/dev/null; then
+    python3 -c "
+import yaml, sys
+path = sys.argv[1]
+obs = sys.argv[2]
+with open(path, 'r') as f:
+    data = yaml.safe_load(f) or {}
+if 'unvalidated_observations' not in data:
+    data['unvalidated_observations'] = []
+data['unvalidated_observations'].append(obs)
+with open(path, 'w') as f:
+    yaml.dump(data, f, default_flow_style=False, width=120, allow_unicode=True)
+" "$expertise_path" "$observation" 2>/dev/null || true
+  else
+    # Fallback: append raw YAML (less safe but works without python3)
+    echo "  - \"${observation}\"" >> "$expertise_path"
+  fi
+done
+
+# Count how many projects were updated
+updated=${#PROJECT_FILES[@]}
+if [ "$updated" -gt 0 ]; then
+  echo "rebar: post-commit hook appended observations to $updated project(s)" >&2
+fi
