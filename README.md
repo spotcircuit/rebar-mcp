@@ -98,6 +98,7 @@ These replace the Claude Code slash commands. Your AI calls them directly.
 | `rebar_discard` | Discard a stale observation with a reason |
 | `rebar_ingest` | List files in raw/ ready for ingestion |
 | `rebar_stats` | Dashboard: projects, observations, wiki pages, last updated |
+| `rebar_ingest_paperclip` | Ingest Paperclip agent run history into expertise.yaml and optionally wiki |
 
 ## Editor Setup
 
@@ -213,6 +214,16 @@ The server reads and writes directly to the Rebar filesystem:
 - `raw/` for file ingestion intake
 
 No database, no config files, no API keys needed. It reads the same files Claude Code reads, making the knowledge available to every AI tool.
+
+## Paperclip Integration
+
+The `rebar_ingest_paperclip` tool queries the Paperclip orchestration database to ingest agent run history. This closes the full loop: agents build → Paperclip tracks → rebar learns → `/improve` validates.
+
+```
+rebar_ingest_paperclip({ since: "2026-04-10", project: "paperclip", write_wiki: true })
+```
+
+**Requires:** A running Paperclip instance with PostgreSQL (default: localhost:54329). Connection params are configurable via tool arguments.
 
 ## License
 

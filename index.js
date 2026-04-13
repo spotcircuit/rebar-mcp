@@ -7,6 +7,7 @@ const path = require("path");
 const yaml = require("js-yaml");
 const { z } = require("zod");
 const { execSync } = require("child_process");
+const { Client: PgClient } = require("pg");
 
 // ---------------------------------------------------------------------------
 // Find the Rebar root directory
@@ -1796,6 +1797,204 @@ server.tool(
     }
 
     return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: rebar_ingest_paperclip
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "rebar_ingest_paperclip",
+  "Ingest Paperclip run history into rebar expertise.yaml and optionally wiki. Queries the Paperclip DB for completed agent runs, extracts agent name, issue title, token count, and completion comment, then appends structured observations.",
+  {
+    since: z.string().optional().describe("ISO date to filter runs from (default: last 7 days). Example: 2026-04-10"),
+    project: z.string().optional().describe("Target project name for observations (default: auto-detect from agent name or use 'paperclip')"),
+    write_wiki: z.boolean().optional().describe("Also write a wiki page summarizing agent activity (default: false)"),
+    db_host: z.string().optional().describe("Paperclip DB host (default: localhost)"),
+    db_port: z.number().optional().describe("Paperclip DB port (default: 54329)"),
+    db_user: z.string().optional().describe("Paperclip DB user (default: paperclip)"),
+    db_password: z.string().optional().describe("Paperclip DB password (default: paperclip)"),
+    db_name: z.string().optional().describe("Paperclip DB name (default: paperclip)"),
+  },
+  async ({ since, project, write_wiki, db_host, db_port, db_user, db_password, db_name }) => {
+    const root = REBAR_ROOT;
+
+    // Default to last 7 days
+    const sinceDate = since || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+    const pg = new PgClient({
+      host: db_host || "localhost",
+      port: db_port || 54329,
+      user: db_user || "paperclip",
+      password: db_password || "paperclip",
+      database: db_name || "paperclip",
+    });
+
+    try {
+      await pg.connect();
+
+      // Query completed runs with agent info, issue info, token counts, and completion comments
+      const { rows } = await pg.query(`
+        SELECT
+          r.id as run_id,
+          a.name as agent_name,
+          r.status as run_status,
+          r.started_at,
+          r.finished_at,
+          EXTRACT(EPOCH FROM (r.finished_at - r.started_at))::int as duration_secs,
+          i.title as issue_title,
+          i.identifier as issue_identifier,
+          i.status as issue_status,
+          LEFT(ic.body, 500) as comment_excerpt,
+          COALESCE(ce.input_tokens, 0) as input_tokens,
+          COALESCE(ce.output_tokens, 0) as output_tokens,
+          COALESCE(ce.cost_cents, 0) as cost_cents
+        FROM heartbeat_runs r
+        JOIN agents a ON r.agent_id = a.id
+        LEFT JOIN issue_comments ic ON ic.created_by_run_id = r.id
+        LEFT JOIN issues i ON ic.issue_id = i.id
+        LEFT JOIN LATERAL (
+          SELECT SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens, SUM(cost_cents) as cost_cents
+          FROM cost_events ce2
+          WHERE ce2.heartbeat_run_id = r.id
+        ) ce ON true
+        WHERE r.status = 'succeeded'
+          AND r.finished_at >= $1::timestamp
+        ORDER BY r.finished_at DESC
+      `, [sinceDate]);
+
+      await pg.end();
+
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `No completed Paperclip runs found since ${sinceDate}.` }] };
+      }
+
+      // Deduplicate: one entry per run_id (a run may have multiple comments)
+      const seenRuns = new Map();
+      for (const row of rows) {
+        if (!seenRuns.has(row.run_id)) {
+          seenRuns.set(row.run_id, row);
+        }
+      }
+      const uniqueRuns = Array.from(seenRuns.values());
+
+      // Group runs by agent name
+      const byAgent = {};
+      for (const run of uniqueRuns) {
+        const agent = run.agent_name || "unknown";
+        if (!byAgent[agent]) byAgent[agent] = [];
+        byAgent[agent].push(run);
+      }
+
+      // Determine target project for observations
+      const targetProject = project || "paperclip";
+      const projDir = resolveProjectDir(root, targetProject);
+
+      const observations = [];
+      const summaryLines = [];
+      const timestamp = new Date().toISOString().split("T")[0];
+
+      for (const [agentName, runs] of Object.entries(byAgent)) {
+        const totalTokens = runs.reduce((sum, r) => sum + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
+        const completedIssues = runs.filter(r => r.issue_title).map(r => r.issue_title);
+
+        summaryLines.push(`### ${agentName}`);
+        summaryLines.push(`- Runs: ${runs.length} | Tokens: ${totalTokens.toLocaleString()} | Issues: ${completedIssues.length}`);
+
+        for (const run of runs) {
+          const tokens = (run.input_tokens || 0) + (run.output_tokens || 0);
+          const issueLabel = run.issue_title ? `${run.issue_identifier || ""} ${run.issue_title}` : "no linked issue";
+          const durationMin = run.duration_secs ? `${Math.round(run.duration_secs / 60)}m` : "?";
+          const summary = run.comment_excerpt
+            ? run.comment_excerpt.split("\n").filter(l => l.trim() && !l.startsWith("#")).slice(0, 2).join("; ").substring(0, 120)
+            : "no comment";
+
+          const obs = `[paperclip] ${agentName} completed ${issueLabel} — ${tokens.toLocaleString()} tokens, ${durationMin}, ${summary}`;
+          observations.push(obs);
+          summaryLines.push(`  - ${issueLabel} (${durationMin}, ${tokens.toLocaleString()} tok)`);
+        }
+        summaryLines.push("");
+      }
+
+      // Append observations to expertise.yaml if project exists
+      let expertiseMsg = "";
+      if (projDir) {
+        const expertisePath = path.join(projDir, "expertise.yaml");
+        if (fs.existsSync(expertisePath)) {
+          const data = yaml.load(fs.readFileSync(expertisePath, "utf8")) || {};
+          if (!data.unvalidated_observations) data.unvalidated_observations = [];
+
+          for (const obs of observations) {
+            data.unvalidated_observations.push(`[${timestamp}] ${obs}`);
+          }
+
+          fs.writeFileSync(expertisePath, yaml.dump(data, { lineWidth: 120, noRefs: true }), "utf8");
+          expertiseMsg = `Appended ${observations.length} observations to ${targetProject}/expertise.yaml (${data.unvalidated_observations.length} total).`;
+        } else {
+          expertiseMsg = `No expertise.yaml found for '${targetProject}'. Observations listed below but not persisted.`;
+        }
+      } else {
+        expertiseMsg = `Project '${targetProject}' not found. Observations listed below but not persisted. Create tools/paperclip/ or specify a project.`;
+      }
+
+      // Optionally write wiki page
+      let wikiMsg = "";
+      if (write_wiki) {
+        const wikiDir = path.join(root, "wiki", "agents");
+        if (!fs.existsSync(wikiDir)) {
+          fs.mkdirSync(wikiDir, { recursive: true });
+        }
+        const wikiPath = path.join(wikiDir, `paperclip-activity-${timestamp}.md`);
+        const wikiContent = [
+          `# Paperclip Agent Activity — ${timestamp}`,
+          "",
+          `#paperclip #agents #activity`,
+          "",
+          `Ingested from Paperclip DB. Runs since ${sinceDate}.`,
+          "",
+          ...summaryLines,
+          "",
+          `Source: rebar_ingest_paperclip, ${timestamp}`,
+          "",
+          "## Related",
+          "",
+          "- [[paperclip-overview]] -- Paperclip orchestration platform",
+        ].join("\n");
+
+        fs.writeFileSync(wikiPath, wikiContent, "utf8");
+
+        // Update wiki index
+        const indexPath = path.join(root, "wiki", "index.md");
+        if (fs.existsSync(indexPath)) {
+          let index = fs.readFileSync(indexPath, "utf8");
+          const entry = `- [Paperclip Activity ${timestamp}](agents/paperclip-activity-${timestamp}.md) -- Agent run summary`;
+          if (!index.includes(entry)) {
+            index = index.trimEnd() + "\n" + entry + "\n";
+            fs.writeFileSync(indexPath, index, "utf8");
+          }
+        }
+        wikiMsg = `Wiki page written: wiki/agents/paperclip-activity-${timestamp}.md`;
+      }
+
+      const output = [
+        `## Paperclip Ingest: ${uniqueRuns.length} runs from ${Object.keys(byAgent).length} agents (since ${sinceDate})`,
+        "",
+        expertiseMsg,
+        wikiMsg,
+        "",
+        ...summaryLines,
+      ].filter(Boolean).join("\n");
+
+      return { content: [{ type: "text", text: output }] };
+
+    } catch (err) {
+      try { await pg.end(); } catch (_) {}
+      return {
+        content: [{ type: "text", text: `Paperclip DB error: ${err.message}. Check DB connection (default: localhost:54329, user paperclip, db paperclip).` }],
+        isError: true,
+      };
+    }
   }
 );
 
