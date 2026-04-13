@@ -280,15 +280,16 @@ function searchDirForContent(dir, query, results, root) {
 // ---------------------------------------------------------------------------
 const server = new McpServer({
   name: "rebar-mcp",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 let REBAR_ROOT;
 try {
   REBAR_ROOT = getRebarRoot();
 } catch (e) {
-  console.error(e.message);
-  process.exit(1);
+  // No rebar root found — start anyway so rebar_init can create one
+  REBAR_ROOT = process.cwd();
+  console.error(`No rebar project found. Using ${REBAR_ROOT} as root. Run rebar_init to scaffold.`);
 }
 
 // --- Resources ---
@@ -839,10 +840,13 @@ server.tool(
       return { content: [{ type: "text", text: "Rebar is already initialized in this directory." }] };
     }
 
+    // Update REBAR_ROOT now that we have a valid scaffold
+    REBAR_ROOT = root;
+
     return {
       content: [{
         type: "text",
-        text: `Rebar initialized. Created:\n${created.map(c => `  - ${c}`).join("\n")}\n\nNext: run rebar_discover to scan your codebase and generate expertise.yaml.`,
+        text: `Rebar initialized in ${root}. Created:\n${created.map(c => `  - ${c}`).join("\n")}\n\nNext: run rebar_discover to scan your codebase and generate expertise.yaml.`,
       }],
     };
   }
