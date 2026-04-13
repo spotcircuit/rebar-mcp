@@ -36,6 +36,10 @@ function findRebarRoot(startDir) {
 // ---------------------------------------------------------------------------
 
 function getRebarRoot() {
+  // Check REBAR_ROOT env var first
+  if (process.env.REBAR_ROOT && fs.existsSync(process.env.REBAR_ROOT)) {
+    return process.env.REBAR_ROOT;
+  }
   const root = findRebarRoot(process.cwd());
   if (!root) {
     // Fall back to common locations
