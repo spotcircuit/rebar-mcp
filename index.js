@@ -8,6 +8,7 @@ const yaml = require("js-yaml");
 const { z } = require("zod");
 const { execSync } = require("child_process");
 const { Client: PgClient } = require("pg");
+const Database = require("better-sqlite3");
 
 // ---------------------------------------------------------------------------
 // Find the Rebar root directory
@@ -414,11 +415,20 @@ server.resource(
 
 server.tool(
   "rebar_list_projects",
-  "List all projects (apps/ + clients/ + tools/) with basic info",
+  "List all projects (apps/ + clients/ + tools/) with compact summaries. Use rebar_detail(type='expertise', id=project_name) for full content.",
   {},
   async () => {
     const projects = listProjects(REBAR_ROOT);
-    return { content: [{ type: "text", text: JSON.stringify(projects, null, 2) }] };
+    if (projects.length === 0) {
+      return { content: [{ type: "text", text: "No projects found. Run rebar_init and rebar_discover to get started." }] };
+    }
+    const lines = projects.map(p => {
+      const obs = p.observation_count > 0 ? `, ${p.observation_count} obs` : "";
+      return `- **${p.name}** (${p.type}) updated ${p.last_updated || "never"}${obs}`;
+    });
+    lines.push("");
+    lines.push("_Use rebar_detail(type='expertise', id='<name>') for full content._");
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 
@@ -505,7 +515,7 @@ server.tool(
 
 server.tool(
   "rebar_search",
-  "Search across all expertise files and wiki for a term",
+  "Search across all expertise files and wiki for a term. Returns compact results. Use rebar_detail for full content.",
   {
     query: z.string().describe("Search term"),
   },
@@ -514,10 +524,17 @@ server.tool(
     if (results.length === 0) {
       return { content: [{ type: "text", text: `No results found for '${query}'.` }] };
     }
-    const text = results.map((r) => {
-      return `### ${r.source}\n${r.matches.join("\n---\n")}`;
-    }).join("\n\n");
-    return { content: [{ type: "text", text }] };
+    const lines = results.map((r) => {
+      const firstMatch = r.matches[0] || "";
+      const snippet = firstMatch.split("\n")[0].substring(0, 120);
+      const extra = r.matches.length > 1 ? ` (+${r.matches.length - 1} more)` : "";
+      const sourceType = r.source.startsWith("expertise:") ? "expertise" : "wiki";
+      const sourceId = r.source.replace(/^(expertise|wiki):\s*/, "").replace(/^(apps|clients|tools)\//, "").replace(/\.md$/, "");
+      return `- **${r.source}**: ${snippet}${extra} → rebar_detail(type='${sourceType}', id='${sourceId}')`;
+    });
+    lines.push("");
+    lines.push("_Use rebar_detail to get full content for any result._");
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 
@@ -566,42 +583,36 @@ server.tool(
   }
 );
 
-server.tool(
-  "rebar_promote",
-  "Promote an observation from unvalidated_observations into a target section",
-  {
-    project: z.string().describe("Project name"),
-    observation_index: z.number().describe("Index of the observation to promote"),
-    target_section: z.string().describe("Target section in expertise.yaml (e.g. api_gotchas, key_decisions, architecture)"),
-  },
-  async ({ project, observation_index, target_section }) => {
-    const projDir = resolveProjectDir(REBAR_ROOT, project);
-    if (!projDir) {
-      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+// --- Unified resolve_observation handler ---
+async function resolveObservation({ project, observation_index, action, target_section, reason }) {
+  const projDir = resolveProjectDir(REBAR_ROOT, project);
+  if (!projDir) {
+    return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+  }
+  const expertisePath = path.join(projDir, "expertise.yaml");
+  if (!fs.existsSync(expertisePath)) {
+    return { content: [{ type: "text", text: `No expertise.yaml found for '${project}'.` }], isError: true };
+  }
+
+  const raw = fs.readFileSync(expertisePath, "utf8");
+  const data = yaml.load(raw);
+  const observations = data.unvalidated_observations || [];
+
+  if (observation_index < 0 || observation_index >= observations.length) {
+    return {
+      content: [{ type: "text", text: `Invalid index ${observation_index}. There are ${observations.length} observations (0-${observations.length - 1}).` }],
+      isError: true,
+    };
+  }
+
+  const obs = observations[observation_index];
+  const obsText = typeof obs === "string" ? obs : JSON.stringify(obs);
+
+  if (action === "promote") {
+    if (!target_section) {
+      return { content: [{ type: "text", text: "target_section is required for promote action." }], isError: true };
     }
-    const expertisePath = path.join(projDir, "expertise.yaml");
-    if (!fs.existsSync(expertisePath)) {
-      return { content: [{ type: "text", text: `No expertise.yaml found for '${project}'.` }], isError: true };
-    }
-
-    const raw = fs.readFileSync(expertisePath, "utf8");
-    const data = yaml.load(raw);
-    const observations = data.unvalidated_observations || [];
-
-    if (observation_index < 0 || observation_index >= observations.length) {
-      return {
-        content: [{ type: "text", text: `Invalid index ${observation_index}. There are ${observations.length} observations (0-${observations.length - 1}).` }],
-        isError: true,
-      };
-    }
-
-    const obs = observations[observation_index];
-    const obsText = typeof obs === "string" ? obs : JSON.stringify(obs);
-
-    // Remove timestamp prefix if present for cleaner promotion
     const cleanObs = obsText.replace(/^\[\d{4}-\d{2}-\d{2}\]\s*/, "");
-
-    // Ensure target section exists as an array
     if (!data[target_section]) {
       data[target_section] = [];
     }
@@ -611,13 +622,9 @@ server.tool(
         isError: true,
       };
     }
-
-    // Add to target section and remove from observations
     data[target_section].push(cleanObs);
     data.unvalidated_observations.splice(observation_index, 1);
-
     fs.writeFileSync(expertisePath, yaml.dump(data, { lineWidth: 120, noRefs: true }), "utf8");
-
     return {
       content: [{
         type: "text",
@@ -625,62 +632,76 @@ server.tool(
       }],
     };
   }
-);
 
-server.tool(
-  "rebar_discard",
-  "Discard a stale observation from unvalidated_observations",
-  {
-    project: z.string().describe("Project name"),
-    observation_index: z.number().describe("Index of the observation to discard"),
-    reason: z.string().describe("Why this observation is being discarded"),
-  },
-  async ({ project, observation_index, reason }) => {
-    const projDir = resolveProjectDir(REBAR_ROOT, project);
-    if (!projDir) {
-      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
-    }
-    const expertisePath = path.join(projDir, "expertise.yaml");
-    if (!fs.existsSync(expertisePath)) {
-      return { content: [{ type: "text", text: `No expertise.yaml found for '${project}'.` }], isError: true };
-    }
-
-    const raw = fs.readFileSync(expertisePath, "utf8");
-    const data = yaml.load(raw);
-    const observations = data.unvalidated_observations || [];
-
-    if (observation_index < 0 || observation_index >= observations.length) {
-      return {
-        content: [{ type: "text", text: `Invalid index ${observation_index}. There are ${observations.length} observations (0-${observations.length - 1}).` }],
-        isError: true,
-      };
-    }
-
-    const discarded = observations[observation_index];
-    const discardedText = typeof discarded === "string" ? discarded : JSON.stringify(discarded);
-
-    // Remove the observation
+  if (action === "discard") {
     data.unvalidated_observations.splice(observation_index, 1);
-
     fs.writeFileSync(expertisePath, yaml.dump(data, { lineWidth: 120, noRefs: true }), "utf8");
-
-    // Log the discard to notes.md if it exists
     const notesPath = path.join(projDir, "notes.md");
     const timestamp = new Date().toISOString().split("T")[0];
-    const logEntry = `\n- [${timestamp}] Discarded observation: "${discardedText}" -- Reason: ${reason}\n`;
+    const logEntry = `\n- [${timestamp}] Discarded observation: "${obsText}" -- Reason: ${reason || "no reason given"}\n`;
     try {
       fs.appendFileSync(notesPath, logEntry, "utf8");
     } catch (_) {
       // notes.md may not exist, that's fine
     }
-
     return {
       content: [{
         type: "text",
-        text: `Discarded observation #${observation_index} from ${project}/expertise.yaml.\n\nDiscarded: ${discardedText}\nReason: ${reason}\n\nRemaining observations: ${data.unvalidated_observations.length}`,
+        text: `Discarded observation #${observation_index} from ${project}/expertise.yaml.\n\nDiscarded: ${obsText}\nReason: ${reason || "no reason given"}\n\nRemaining observations: ${data.unvalidated_observations.length}`,
       }],
     };
   }
+
+  if (action === "defer") {
+    return {
+      content: [{
+        type: "text",
+        text: `Deferred observation #${observation_index} in ${project}/expertise.yaml — left in place for future review.\n\nObservation: ${obsText}\nReason: ${reason || "cannot verify yet"}`,
+      }],
+    };
+  }
+
+  return { content: [{ type: "text", text: `Unknown action '${action}'. Use promote, discard, or defer.` }], isError: true };
+}
+
+// Primary tool: rebar_resolve_observation
+server.tool(
+  "rebar_resolve_observation",
+  "Resolve an unvalidated observation: promote to a section, discard, or defer",
+  {
+    project: z.string().describe("Project name"),
+    observation_index: z.number().describe("Index of the observation to resolve"),
+    action: z.enum(["promote", "discard", "defer"]).describe("Action: promote (move to section), discard (remove), or defer (leave for later)"),
+    target_section: z.string().optional().describe("Target section in expertise.yaml (required for promote, e.g. api_gotchas, key_decisions, architecture)"),
+    reason: z.string().optional().describe("Reason for discarding or deferring"),
+  },
+  async (params) => resolveObservation(params)
+);
+
+// Backward-compatible alias: rebar_promote
+server.tool(
+  "rebar_promote",
+  "[Alias for rebar_resolve_observation] Promote an observation into a target section",
+  {
+    project: z.string().describe("Project name"),
+    observation_index: z.number().describe("Index of the observation to promote"),
+    target_section: z.string().describe("Target section in expertise.yaml (e.g. api_gotchas, key_decisions, architecture)"),
+  },
+  async ({ project, observation_index, target_section }) =>
+    resolveObservation({ project, observation_index, action: "promote", target_section })
+);
+
+// Backward-compatible alias: rebar_discard
+server.tool(
+  "rebar_discard",
+  "[Alias for rebar_resolve_observation] Discard a stale observation",
+  {
+    project: z.string().describe("Project name"),
+    observation_index: z.number().describe("Index of the observation to discard"),
+    reason: z.string().describe("Why this observation is being discarded"),
+  },
+  async ({ project, observation_index, reason }) =>
+    resolveObservation({ project, observation_index, action: "discard", reason })
 );
 
 server.tool(
@@ -966,6 +987,10 @@ server.tool(
     const dirList = tree.filter(t => t.type === "dir").map(t => t.path + "/").join("\n");
     const fileContents = analysis.map(a => `### ${a.file}\n\`\`\`\n${a.content}\n\`\`\``).join("\n\n");
 
+    // Auto-generate brief from the freshly created expertise.yaml
+    const expertiseData = parseExpertise(root, project);
+    const brief = generateBrief(expertiseData);
+
     return {
       content: [{
         type: "text",
@@ -990,6 +1015,12 @@ server.tool(
           "## Key Files",
           "",
           fileContents || "(no key files found)",
+          "",
+          "---",
+          "",
+          "## Project Brief",
+          "",
+          brief,
           "",
           "---",
           "",
@@ -1086,7 +1117,9 @@ server.tool(
 
     observations.forEach((obs, i) => {
       const obsText = typeof obs === "string" ? obs : JSON.stringify(obs);
-      lines.push(`${i}. ${obsText}`);
+      // Compact: truncate to ~80 chars with pointer to rebar_detail
+      const truncated = obsText.length > 80 ? obsText.substring(0, 77) + "..." : obsText;
+      lines.push(`${i}. ${truncated}`);
     });
 
     lines.push("");
@@ -1107,10 +1140,11 @@ server.tool(
     lines.push("");
     lines.push("## Instructions");
     lines.push("");
+    lines.push("Use rebar_detail(type='observation', id='{project}/{index}') to read full text before deciding.");
     lines.push("For each observation, decide:");
-    lines.push("- **PROMOTE** — confirmed fact → rebar_promote(project, index, section)");
-    lines.push("- **DISCARD** — stale or duplicate → rebar_discard(project, index, reason)");
-    lines.push("- **DEFER** — can't verify yet, leave it");
+    lines.push("- **PROMOTE** — confirmed fact → rebar_resolve_observation(project, index, 'promote', target_section)");
+    lines.push("- **DISCARD** — stale or duplicate → rebar_resolve_observation(project, index, 'discard', reason=...)");
+    lines.push("- **DEFER** — can't verify yet → rebar_resolve_observation(project, index, 'defer', reason=...)");
     lines.push("");
     lines.push("Work from highest index to lowest when removing multiple (indices shift).");
 
@@ -1461,6 +1495,54 @@ server.tool(
     const isUpdate = fs.existsSync(fullPath);
     fs.writeFileSync(fullPath, content, "utf8");
     return { content: [{ type: "text", text: `${isUpdate ? "Updated" : "Created"} ${file_path}` }] };
+  }
+);
+
+server.tool(
+  "rebar_detail",
+  "Get full content for a specific item. Use after rebar_list_projects, rebar_search, or rebar_improve return compact summaries.",
+  {
+    type: z.enum(["expertise", "wiki", "observation"]).describe("Type of content to retrieve"),
+    id: z.string().describe("For expertise: project name. For wiki: page name (with or without .md). For observation: 'project/index' (e.g. 'my-app/3')."),
+  },
+  async ({ type, id }) => {
+    if (type === "expertise") {
+      const content = readExpertise(REBAR_ROOT, id);
+      if (!content) {
+        return { content: [{ type: "text", text: `Project '${id}' not found or has no expertise.yaml.` }], isError: true };
+      }
+      return { content: [{ type: "text", text: content }] };
+    }
+
+    if (type === "wiki") {
+      const page = getWikiPage(REBAR_ROOT, id);
+      if (!page) {
+        return { content: [{ type: "text", text: `Wiki page '${id}' not found.` }], isError: true };
+      }
+      return { content: [{ type: "text", text: page }] };
+    }
+
+    if (type === "observation") {
+      const parts = id.split("/");
+      if (parts.length < 2) {
+        return { content: [{ type: "text", text: "For observations, use 'project/index' format (e.g. 'my-app/3')." }], isError: true };
+      }
+      const project = parts.slice(0, -1).join("/");
+      const index = parseInt(parts[parts.length - 1], 10);
+      const data = parseExpertise(REBAR_ROOT, project);
+      if (!data) {
+        return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+      }
+      const observations = data.unvalidated_observations || [];
+      if (isNaN(index) || index < 0 || index >= observations.length) {
+        return { content: [{ type: "text", text: `Invalid index ${index}. There are ${observations.length} observations (0-${observations.length - 1}).` }], isError: true };
+      }
+      const obs = observations[index];
+      const obsText = typeof obs === "string" ? obs : JSON.stringify(obs, null, 2);
+      return { content: [{ type: "text", text: `**Observation #${index} (${project}):**\n${obsText}` }] };
+    }
+
+    return { content: [{ type: "text", text: `Unknown type '${type}'. Use: expertise, wiki, or observation.` }], isError: true };
   }
 );
 
