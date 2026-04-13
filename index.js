@@ -2505,6 +2505,506 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// rebar_review — compare code changes against expertise, flag deviations
+// ---------------------------------------------------------------------------
+
+function resolveCodeDir(root, project) {
+  const projDir = resolveProjectDir(root, project);
+  if (!projDir) return null;
+
+  // 1. Check app.yaml / client.yaml / tool.yaml for codebase.path
+  for (const cfgName of ["app.yaml", "client.yaml", "tool.yaml"]) {
+    const cfgPath = path.join(projDir, cfgName);
+    if (fs.existsSync(cfgPath)) {
+      try {
+        const cfg = yaml.load(fs.readFileSync(cfgPath, "utf8"));
+        if (cfg && cfg.codebase && cfg.codebase.path && fs.existsSync(cfg.codebase.path)) {
+          return cfg.codebase.path;
+        }
+      } catch (_) {}
+    }
+  }
+
+  // 2. Check if project dir itself is a git repo
+  if (fs.existsSync(path.join(projDir, ".git"))) {
+    return projDir;
+  }
+
+  // 3. Check expertise.yaml for repo field, look for local clone
+  try {
+    const data = parseExpertise(root, project);
+    if (data && data.repo) {
+      const repoName = String(data.repo).split("/").pop().replace(/\.git$/, "");
+      const homeDir = process.env.HOME || "";
+      const candidates = [
+        path.join(homeDir, repoName),
+        path.join(homeDir, "projects", repoName),
+        path.join(homeDir, "code", repoName),
+        path.join(homeDir, "src", repoName),
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(path.join(c, ".git"))) return c;
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+function extractExpertiseClaims(data) {
+  const claims = [];
+  if (!data) return claims;
+
+  // Tech stack claims
+  if (data.architecture) {
+    const arch = data.architecture;
+    if (arch.frontend) {
+      if (arch.frontend.framework) claims.push({ category: "tech_stack", key: "frontend_framework", value: arch.frontend.framework });
+      if (arch.frontend.port) claims.push({ category: "tech_stack", key: "frontend_port", value: String(arch.frontend.port) });
+      if (arch.frontend.language) claims.push({ category: "tech_stack", key: "frontend_language", value: arch.frontend.language });
+    }
+    if (arch.backend) {
+      if (arch.backend.framework) claims.push({ category: "tech_stack", key: "backend_framework", value: arch.backend.framework });
+      if (arch.backend.port) claims.push({ category: "tech_stack", key: "backend_port", value: String(arch.backend.port) });
+      if (arch.backend.language) claims.push({ category: "tech_stack", key: "backend_language", value: arch.backend.language });
+    }
+    if (arch.database) {
+      const db = typeof arch.database === "string" ? arch.database : (arch.database.type || arch.database.engine || JSON.stringify(arch.database));
+      claims.push({ category: "tech_stack", key: "database", value: db });
+    }
+    if (arch.cache) {
+      const cache = typeof arch.cache === "string" ? arch.cache : (arch.cache.type || JSON.stringify(arch.cache));
+      claims.push({ category: "tech_stack", key: "cache", value: cache });
+    }
+    if (arch.queue || arch.message_queue) {
+      const q = arch.queue || arch.message_queue;
+      const qVal = typeof q === "string" ? q : (q.type || JSON.stringify(q));
+      claims.push({ category: "tech_stack", key: "queue", value: qVal });
+    }
+    if (arch.api_style) {
+      claims.push({ category: "tech_stack", key: "api_style", value: arch.api_style });
+    }
+  }
+
+  // API endpoints
+  if (data.api && data.api.endpoints) {
+    const endpoints = Array.isArray(data.api.endpoints) ? data.api.endpoints : [];
+    claims.push({ category: "api", key: "endpoint_count", value: String(endpoints.length) });
+    for (const ep of endpoints) {
+      const epStr = typeof ep === "string" ? ep : (ep.path || ep.route || ep.url || JSON.stringify(ep));
+      claims.push({ category: "api", key: "endpoint", value: epStr });
+    }
+  }
+
+  // Dependencies / services
+  if (data.dependencies) {
+    const deps = Array.isArray(data.dependencies) ? data.dependencies : [];
+    for (const dep of deps) {
+      const depStr = typeof dep === "string" ? dep : (dep.name || JSON.stringify(dep));
+      claims.push({ category: "dependency", key: "service", value: depStr });
+    }
+  }
+
+  // Decisions
+  if (data.decisions) {
+    const decisions = Array.isArray(data.decisions) ? data.decisions : [];
+    for (const d of decisions) {
+      const dStr = typeof d === "string" ? d : (d.decision || d.what || JSON.stringify(d));
+      claims.push({ category: "decision", key: "decision", value: dStr });
+    }
+  }
+
+  // Pipeline
+  if (data.pipeline && data.pipeline.steps) {
+    claims.push({ category: "pipeline", key: "step_count", value: String(data.pipeline.steps.length) });
+  }
+
+  // Patterns / conventions
+  if (data.patterns) {
+    const patterns = Array.isArray(data.patterns) ? data.patterns : [];
+    for (const p of patterns) {
+      const pStr = typeof p === "string" ? p : (p.name || p.pattern || JSON.stringify(p));
+      claims.push({ category: "pattern", key: "pattern", value: pStr });
+    }
+  }
+
+  return claims;
+}
+
+function checkClaimAgainstDiff(claim, diffText) {
+  const diffLower = diffText.toLowerCase();
+  const valueLower = claim.value.toLowerCase();
+  const deviations = [];
+
+  if (claim.category === "tech_stack") {
+    // Look for competing technologies in the diff
+    const techConflicts = {
+      // Frontend frameworks
+      react: ["vue", "angular", "svelte", "solid"],
+      vue: ["react", "angular", "svelte", "solid"],
+      angular: ["react", "vue", "svelte", "solid"],
+      svelte: ["react", "vue", "angular", "solid"],
+      // Backend frameworks
+      express: ["fastify", "koa", "hapi", "nest"],
+      fastapi: ["flask", "django", "starlette"],
+      flask: ["fastapi", "django"],
+      django: ["fastapi", "flask"],
+      // Databases
+      postgres: ["mysql", "mariadb", "mongodb", "sqlite"],
+      postgresql: ["mysql", "mariadb", "mongodb", "sqlite"],
+      mysql: ["postgres", "postgresql", "mongodb", "sqlite"],
+      mongodb: ["postgres", "postgresql", "mysql", "sqlite"],
+      sqlite: ["postgres", "postgresql", "mysql", "mongodb"],
+      // Cache
+      redis: ["memcached", "memcache"],
+      memcached: ["redis"],
+      memcache: ["redis"],
+      // API styles
+      rest: ["graphql", "grpc", "trpc"],
+      graphql: ["rest", "grpc"],
+      grpc: ["rest", "graphql"],
+    };
+
+    // Find which tech keywords match the claim value
+    for (const [tech, conflicts] of Object.entries(techConflicts)) {
+      if (valueLower.includes(tech)) {
+        for (const conflict of conflicts) {
+          // Check if the diff introduces imports/requires/configs for a conflicting tech
+          const conflictPatterns = [
+            `require("${conflict}`,
+            `require('${conflict}`,
+            `from "${conflict}`,
+            `from '${conflict}`,
+            `import ${conflict}`,
+            `"${conflict}"`,
+            `'${conflict}'`,
+          ];
+          for (const pat of conflictPatterns) {
+            if (diffLower.includes(pat.toLowerCase())) {
+              deviations.push({
+                type: "tech_conflict",
+                severity: "high",
+                claim: `${claim.key}: ${claim.value}`,
+                found: `Diff introduces ${conflict} (conflicts with expertise claim of ${tech})`,
+              });
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (claim.category === "api" && claim.key === "endpoint") {
+    // Check if endpoints are being removed
+    const endpoint = claim.value;
+    if (diffText.includes(`-`) && diffText.includes(endpoint)) {
+      // Look for the endpoint appearing in removed lines
+      const removedLines = diffText.split("\n").filter(l => l.startsWith("-") && !l.startsWith("---"));
+      for (const line of removedLines) {
+        if (line.toLowerCase().includes(endpoint.toLowerCase())) {
+          deviations.push({
+            type: "endpoint_removed",
+            severity: "medium",
+            claim: `API endpoint: ${endpoint}`,
+            found: `Endpoint appears to be removed in diff`,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  if (claim.category === "decision") {
+    // Check if code changes contradict a documented decision
+    // This is heuristic — look for key terms from the decision in removed lines
+    const keywords = valueLower.split(/\s+/).filter(w => w.length > 4);
+    const removedLines = diffText.split("\n").filter(l => l.startsWith("-") && !l.startsWith("---"));
+    const addedLines = diffText.split("\n").filter(l => l.startsWith("+") && !l.startsWith("+++"));
+
+    for (const kw of keywords) {
+      const removedHits = removedLines.filter(l => l.toLowerCase().includes(kw)).length;
+      const addedHits = addedLines.filter(l => l.toLowerCase().includes(kw)).length;
+      if (removedHits > 0 && addedHits === 0) {
+        deviations.push({
+          type: "decision_drift",
+          severity: "low",
+          claim: `Decision: ${claim.value.substring(0, 100)}`,
+          found: `Code related to "${kw}" was removed — may contradict this decision`,
+        });
+        break;
+      }
+    }
+  }
+
+  return deviations;
+}
+
+function detectNewTechInDiff(diffText, existingClaims) {
+  const findings = [];
+  const addedLines = diffText.split("\n").filter(l => l.startsWith("+") && !l.startsWith("+++"));
+  const addedText = addedLines.join("\n").toLowerCase();
+
+  // Detect new package imports not reflected in expertise
+  const importPatterns = [
+    { regex: /require\(["']([^"'./][^"']*?)["']\)/g, type: "require" },
+    { regex: /from ["']([^"'./][^"']*?)["']/g, type: "import" },
+  ];
+
+  const newPackages = new Set();
+  for (const { regex } of importPatterns) {
+    let match;
+    while ((match = regex.exec(addedText)) !== null) {
+      const pkg = match[1].split("/")[0]; // get base package name
+      if (pkg.length > 1 && !pkg.startsWith("@types")) {
+        newPackages.add(pkg);
+      }
+    }
+  }
+
+  // Detect new route/endpoint definitions
+  const routePatterns = [
+    /\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']/g,
+    /router\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']/g,
+    /@(Get|Post|Put|Delete|Patch)\s*\(\s*["']([^"']+)["']/g,
+    /app\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']/g,
+  ];
+
+  const newRoutes = [];
+  for (const regex of routePatterns) {
+    let match;
+    while ((match = regex.exec(addedText)) !== null) {
+      newRoutes.push(`${match[1].toUpperCase()} ${match[2]}`);
+    }
+  }
+
+  if (newPackages.size > 0) {
+    // Filter out packages already known in expertise claims
+    const knownDeps = existingClaims
+      .filter(c => c.category === "dependency")
+      .map(c => c.value.toLowerCase());
+    const unknown = [...newPackages].filter(
+      pkg => !knownDeps.some(d => d.includes(pkg))
+    );
+    if (unknown.length > 0) {
+      findings.push({
+        type: "new_dependency",
+        severity: "info",
+        claim: "Not in expertise",
+        found: `New packages in diff: ${unknown.join(", ")}`,
+      });
+    }
+  }
+
+  if (newRoutes.length > 0) {
+    const knownEndpoints = existingClaims
+      .filter(c => c.category === "api" && c.key === "endpoint")
+      .map(c => c.value.toLowerCase());
+    const unknown = newRoutes.filter(
+      r => !knownEndpoints.some(e => r.toLowerCase().includes(e.toLowerCase()))
+    );
+    if (unknown.length > 0) {
+      findings.push({
+        type: "new_endpoint",
+        severity: "medium",
+        claim: `Expertise lists ${knownEndpoints.length} endpoints`,
+        found: `New routes in diff: ${unknown.join(", ")}`,
+      });
+    }
+  }
+
+  return findings;
+}
+
+server.tool(
+  "rebar_review",
+  "Compare recent code changes against expertise.yaml — flag deviations where code contradicts documented architecture, tech stack, API endpoints, or decisions. The differentiator: 'Memory tools record. Rebar validates.'",
+  {
+    project: z.string().describe("Project name (resolved from apps/, clients/, tools/)"),
+    since: z.string().optional().describe("Git diff range — default 'HEAD~1'. Use 'HEAD~3', a branch name, or a commit SHA."),
+    auto_observe: z.boolean().optional().describe("Append deviations as unvalidated observations (default true)"),
+    code_dir: z.string().optional().describe("Override: absolute path to the code repository. Auto-detected from app.yaml if omitted."),
+  },
+  async ({ project, since, auto_observe, code_dir }) => {
+    // 1. Load expertise
+    const data = parseExpertise(REBAR_ROOT, project);
+    if (!data) {
+      return { content: [{ type: "text", text: `Project '${project}' not found or has no expertise.yaml.` }], isError: true };
+    }
+
+    // 2. Resolve code directory
+    const codeDir = code_dir || resolveCodeDir(REBAR_ROOT, project);
+    if (!codeDir || !fs.existsSync(codeDir)) {
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Could not find code directory for '${project}'.`,
+            "",
+            "Set one of:",
+            "- `codebase.path` in app.yaml / client.yaml",
+            "- Pass `code_dir` parameter explicitly",
+            "- Ensure the project directory is a git repo",
+          ].join("\n"),
+        }],
+        isError: true,
+      };
+    }
+
+    // Verify it's a git repo
+    if (!fs.existsSync(path.join(codeDir, ".git"))) {
+      return { content: [{ type: "text", text: `'${codeDir}' is not a git repository.` }], isError: true };
+    }
+
+    // 3. Get git diff
+    const diffRange = since || "HEAD~1";
+    let diffText;
+    try {
+      diffText = execSync(`git diff ${diffRange}`, {
+        cwd: codeDir,
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+        timeout: 30000,
+      });
+    } catch (err) {
+      return {
+        content: [{
+          type: "text",
+          text: `Failed to run git diff ${diffRange} in ${codeDir}: ${err.message}`,
+        }],
+        isError: true,
+      };
+    }
+
+    if (!diffText || diffText.trim().length === 0) {
+      return { content: [{ type: "text", text: `No changes found for \`git diff ${diffRange}\` in ${codeDir}.` }] };
+    }
+
+    // 4. Extract claims from expertise
+    const claims = extractExpertiseClaims(data);
+
+    // 5. Check each claim against the diff
+    const allDeviations = [];
+    for (const claim of claims) {
+      const devs = checkClaimAgainstDiff(claim, diffText);
+      allDeviations.push(...devs);
+    }
+
+    // 6. Detect new tech/endpoints not in expertise
+    const newFindings = detectNewTechInDiff(diffText, claims);
+    allDeviations.push(...newFindings);
+
+    // 7. Build diff stats
+    const diffLines = diffText.split("\n");
+    const filesChanged = new Set();
+    for (const line of diffLines) {
+      if (line.startsWith("diff --git")) {
+        const match = line.match(/b\/(.+)$/);
+        if (match) filesChanged.add(match[1]);
+      }
+    }
+    const addedCount = diffLines.filter(l => l.startsWith("+") && !l.startsWith("+++")).length;
+    const removedCount = diffLines.filter(l => l.startsWith("-") && !l.startsWith("---")).length;
+
+    // 8. Auto-observe deviations
+    const shouldObserve = auto_observe !== false;
+    let observeCount = 0;
+    if (shouldObserve && allDeviations.length > 0) {
+      const projDir = resolveProjectDir(REBAR_ROOT, project);
+      const expertisePath = path.join(projDir, "expertise.yaml");
+      const raw = fs.readFileSync(expertisePath, "utf8");
+      const expertiseData = yaml.load(raw);
+      if (!expertiseData.unvalidated_observations) {
+        expertiseData.unvalidated_observations = [];
+      }
+      const timestamp = new Date().toISOString().split("T")[0];
+      for (const dev of allDeviations) {
+        if (dev.severity === "info") continue; // skip info-level for observations
+        const obsText = `[${timestamp}] [rebar_review] ${dev.type}: ${dev.found} (expertise says: ${dev.claim})`;
+        expertiseData.unvalidated_observations.push(obsText);
+        observeCount++;
+      }
+      if (observeCount > 0) {
+        fs.writeFileSync(expertisePath, yaml.dump(expertiseData, { lineWidth: 120, noRefs: true }), "utf8");
+      }
+    }
+
+    // 9. Build report
+    const lines = [];
+    lines.push(`# Rebar Review: ${project}`);
+    lines.push("");
+    lines.push(`**Diff range:** \`${diffRange}\` in \`${codeDir}\``);
+    lines.push(`**Files changed:** ${filesChanged.size} | **+${addedCount}** / **-${removedCount}** lines`);
+    lines.push(`**Expertise claims checked:** ${claims.length}`);
+    lines.push("");
+
+    if (allDeviations.length === 0) {
+      lines.push("## Result: No Deviations Found");
+      lines.push("");
+      lines.push("Code changes are consistent with documented expertise. No conflicts detected.");
+    } else {
+      const highSev = allDeviations.filter(d => d.severity === "high");
+      const medSev = allDeviations.filter(d => d.severity === "medium");
+      const lowSev = allDeviations.filter(d => d.severity === "low");
+      const infoSev = allDeviations.filter(d => d.severity === "info");
+
+      lines.push(`## Result: ${allDeviations.length} Deviation(s) Found`);
+      lines.push("");
+
+      if (highSev.length > 0) {
+        lines.push("### High Severity");
+        for (const d of highSev) {
+          lines.push(`- **${d.type}**: ${d.found}`);
+          lines.push(`  - Expertise says: ${d.claim}`);
+        }
+        lines.push("");
+      }
+      if (medSev.length > 0) {
+        lines.push("### Medium Severity");
+        for (const d of medSev) {
+          lines.push(`- **${d.type}**: ${d.found}`);
+          lines.push(`  - Expertise says: ${d.claim}`);
+        }
+        lines.push("");
+      }
+      if (lowSev.length > 0) {
+        lines.push("### Low Severity");
+        for (const d of lowSev) {
+          lines.push(`- **${d.type}**: ${d.found}`);
+          lines.push(`  - Expertise says: ${d.claim}`);
+        }
+        lines.push("");
+      }
+      if (infoSev.length > 0) {
+        lines.push("### Info");
+        for (const d of infoSev) {
+          lines.push(`- **${d.type}**: ${d.found}`);
+        }
+        lines.push("");
+      }
+    }
+
+    if (shouldObserve && observeCount > 0) {
+      lines.push(`---`);
+      lines.push(`**Auto-observed:** ${observeCount} deviation(s) appended to ${project}/expertise.yaml`);
+      lines.push(`Run \`rebar_validate\` to review and promote/discard them.`);
+    }
+
+    lines.push("");
+    lines.push("---");
+    lines.push("_Files in diff:_");
+    for (const f of [...filesChanged].slice(0, 20)) {
+      lines.push(`- \`${f}\``);
+    }
+    if (filesChanged.size > 20) {
+      lines.push(`- _...and ${filesChanged.size - 20} more_`);
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 async function main() {

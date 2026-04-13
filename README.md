@@ -65,7 +65,7 @@ npx @spotcircuit/rebar-mcp
 | `rebar://commands` | List all available slash commands with descriptions |
 | `rebar://gotchas/{project}` | API gotchas from a project's expertise.yaml |
 
-### Tools — 5 Actions
+### Tools — 6 Actions
 
 Your AI calls these directly. Five verbs cover everything:
 
@@ -87,6 +87,7 @@ Your AI calls these directly. Five verbs cover everything:
 | `rebar_observe` | Append an observation to unvalidated_observations |
 | `rebar_improve` | Review unvalidated observations — promote, discard, or defer |
 | `rebar_validate` | Check if a single observation should be promoted, discarded, or deferred |
+| `rebar_review` | Compare code changes against expertise — flag deviations where code contradicts docs |
 | `rebar_resolve_observation` | Resolve an observation: promote to a section, discard, or defer |
 | `rebar_promote` | *(alias)* Promote an observation into a target section |
 | `rebar_discard` | *(alias)* Discard a stale observation with a reason |
