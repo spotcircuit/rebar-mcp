@@ -6,6 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
 const { z } = require("zod");
+const { execSync } = require("child_process");
 
 // ---------------------------------------------------------------------------
 // Find the Rebar root directory
@@ -350,6 +351,63 @@ server.resource(
   }
 );
 
+server.resource(
+  "commands",
+  "rebar://commands",
+  { description: "List all available slash commands with descriptions" },
+  (uri) => {
+    const commandsDir = path.join(REBAR_ROOT, ".claude", "commands");
+    const lines = ["# Rebar Slash Commands\n"];
+    if (!fs.existsSync(commandsDir)) {
+      return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: "No commands directory found." }] };
+    }
+    const files = fs.readdirSync(commandsDir).filter(f => f.endsWith(".md")).sort();
+    for (const file of files) {
+      const name = file.replace(/\.md$/, "");
+      try {
+        const content = fs.readFileSync(path.join(commandsDir, file), "utf8");
+        // Extract first non-empty, non-frontmatter line as description
+        const contentLines = content.split("\n");
+        let description = "";
+        let inFrontmatter = false;
+        for (const line of contentLines) {
+          if (line.trim() === "---") { inFrontmatter = !inFrontmatter; continue; }
+          if (inFrontmatter) continue;
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith("#")) {
+            description = trimmed.slice(0, 120);
+            break;
+          }
+        }
+        lines.push(`- **/${name}** -- ${description}`);
+      } catch (_) {
+        lines.push(`- **/${name}**`);
+      }
+    }
+    return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: lines.join("\n") }] };
+  }
+);
+
+server.resource(
+  "gotchas",
+  "rebar://gotchas/{project}",
+  { description: "API gotchas from a project's expertise.yaml" },
+  (uri, { project }) => {
+    const data = parseExpertise(REBAR_ROOT, project);
+    if (!data) return { contents: [{ uri: uri.href, mimeType: "text/plain", text: `Project '${project}' not found.` }] };
+    const gotchas = data.api_gotchas || [];
+    if (gotchas.length === 0) {
+      return { contents: [{ uri: uri.href, mimeType: "text/plain", text: `No API gotchas recorded for '${project}'.` }] };
+    }
+    const text = gotchas.map((g, i) => {
+      if (typeof g === "string") return `${i + 1}. ${g}`;
+      if (g.gotcha) return `${i + 1}. **${g.gotcha}:** ${g.detail || ""}`;
+      return `${i + 1}. ${JSON.stringify(g)}`;
+    }).join("\n");
+    return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: `# API Gotchas: ${project}\n\n${text}` }] };
+  }
+);
+
 // --- Tools ---
 
 server.tool(
@@ -458,6 +516,260 @@ server.tool(
       return `### ${r.source}\n${r.matches.join("\n---\n")}`;
     }).join("\n\n");
     return { content: [{ type: "text", text }] };
+  }
+);
+
+server.tool(
+  "rebar_diff",
+  "Show what changed in expertise.yaml since last session (git diff)",
+  {
+    project: z.string().describe("Project name"),
+  },
+  async ({ project }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    if (!fs.existsSync(expertisePath)) {
+      return { content: [{ type: "text", text: `No expertise.yaml found for '${project}'.` }], isError: true };
+    }
+    try {
+      // Get the diff from the last commit
+      const relPath = path.relative(REBAR_ROOT, expertisePath);
+      let diff = "";
+      try {
+        diff = execSync(`git diff HEAD -- "${relPath}"`, { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 });
+      } catch (_) {}
+      if (!diff) {
+        // Try diff against previous commit
+        try {
+          diff = execSync(`git diff HEAD~1 HEAD -- "${relPath}"`, { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 });
+        } catch (_) {}
+      }
+      if (!diff) {
+        // Try log of recent changes
+        try {
+          diff = execSync(`git log --oneline -5 -- "${relPath}"`, { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 });
+          if (diff) diff = `No uncommitted changes. Recent commits:\n${diff}`;
+        } catch (_) {}
+      }
+      if (!diff) {
+        return { content: [{ type: "text", text: `No changes detected for ${project}/expertise.yaml.` }] };
+      }
+      return { content: [{ type: "text", text: diff }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error running git diff: ${e.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "rebar_promote",
+  "Promote an observation from unvalidated_observations into a target section",
+  {
+    project: z.string().describe("Project name"),
+    observation_index: z.number().describe("Index of the observation to promote"),
+    target_section: z.string().describe("Target section in expertise.yaml (e.g. api_gotchas, key_decisions, architecture)"),
+  },
+  async ({ project, observation_index, target_section }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    if (!fs.existsSync(expertisePath)) {
+      return { content: [{ type: "text", text: `No expertise.yaml found for '${project}'.` }], isError: true };
+    }
+
+    const raw = fs.readFileSync(expertisePath, "utf8");
+    const data = yaml.load(raw);
+    const observations = data.unvalidated_observations || [];
+
+    if (observation_index < 0 || observation_index >= observations.length) {
+      return {
+        content: [{ type: "text", text: `Invalid index ${observation_index}. There are ${observations.length} observations (0-${observations.length - 1}).` }],
+        isError: true,
+      };
+    }
+
+    const obs = observations[observation_index];
+    const obsText = typeof obs === "string" ? obs : JSON.stringify(obs);
+
+    // Remove timestamp prefix if present for cleaner promotion
+    const cleanObs = obsText.replace(/^\[\d{4}-\d{2}-\d{2}\]\s*/, "");
+
+    // Ensure target section exists as an array
+    if (!data[target_section]) {
+      data[target_section] = [];
+    }
+    if (!Array.isArray(data[target_section])) {
+      return {
+        content: [{ type: "text", text: `Section '${target_section}' exists but is not an array. Cannot auto-promote.` }],
+        isError: true,
+      };
+    }
+
+    // Add to target section and remove from observations
+    data[target_section].push(cleanObs);
+    data.unvalidated_observations.splice(observation_index, 1);
+
+    fs.writeFileSync(expertisePath, yaml.dump(data, { lineWidth: 120, noRefs: true }), "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: `Promoted observation #${observation_index} to '${target_section}' in ${project}/expertise.yaml.\n\nPromoted: ${cleanObs}\n\nRemaining observations: ${data.unvalidated_observations.length}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_discard",
+  "Discard a stale observation from unvalidated_observations",
+  {
+    project: z.string().describe("Project name"),
+    observation_index: z.number().describe("Index of the observation to discard"),
+    reason: z.string().describe("Why this observation is being discarded"),
+  },
+  async ({ project, observation_index, reason }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    if (!fs.existsSync(expertisePath)) {
+      return { content: [{ type: "text", text: `No expertise.yaml found for '${project}'.` }], isError: true };
+    }
+
+    const raw = fs.readFileSync(expertisePath, "utf8");
+    const data = yaml.load(raw);
+    const observations = data.unvalidated_observations || [];
+
+    if (observation_index < 0 || observation_index >= observations.length) {
+      return {
+        content: [{ type: "text", text: `Invalid index ${observation_index}. There are ${observations.length} observations (0-${observations.length - 1}).` }],
+        isError: true,
+      };
+    }
+
+    const discarded = observations[observation_index];
+    const discardedText = typeof discarded === "string" ? discarded : JSON.stringify(discarded);
+
+    // Remove the observation
+    data.unvalidated_observations.splice(observation_index, 1);
+
+    fs.writeFileSync(expertisePath, yaml.dump(data, { lineWidth: 120, noRefs: true }), "utf8");
+
+    // Log the discard to notes.md if it exists
+    const notesPath = path.join(projDir, "notes.md");
+    const timestamp = new Date().toISOString().split("T")[0];
+    const logEntry = `\n- [${timestamp}] Discarded observation: "${discardedText}" -- Reason: ${reason}\n`;
+    try {
+      fs.appendFileSync(notesPath, logEntry, "utf8");
+    } catch (_) {
+      // notes.md may not exist, that's fine
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `Discarded observation #${observation_index} from ${project}/expertise.yaml.\n\nDiscarded: ${discardedText}\nReason: ${reason}\n\nRemaining observations: ${data.unvalidated_observations.length}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_ingest",
+  "List files in raw/ ready for wiki ingestion",
+  {},
+  async () => {
+    const rawDir = path.join(REBAR_ROOT, "raw");
+    if (!fs.existsSync(rawDir)) {
+      return { content: [{ type: "text", text: "No raw/ directory found." }] };
+    }
+    const files = [];
+    for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) continue; // skip processed/ etc.
+      if (entry.name.startsWith(".")) continue;
+      const fullPath = path.join(rawDir, entry.name);
+      const stat = fs.statSync(fullPath);
+      files.push({
+        name: entry.name,
+        size: stat.size,
+        modified: stat.mtime.toISOString().split("T")[0],
+      });
+    }
+    if (files.length === 0) {
+      return { content: [{ type: "text", text: "No files waiting in raw/. Drop files there and run /wiki-ingest." }] };
+    }
+    const text = `**${files.length} file(s) ready for ingestion:**\n\n` +
+      files.map(f => `- **${f.name}** (${(f.size / 1024).toFixed(1)} KB, modified ${f.modified})`).join("\n");
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+server.tool(
+  "rebar_stats",
+  "Dashboard overview: projects, observations, wiki pages, last updated",
+  {},
+  async () => {
+    const projects = listProjects(REBAR_ROOT);
+    const totalObs = projects.reduce((sum, p) => sum + p.observation_count, 0);
+
+    // Count wiki pages
+    let wikiPages = 0;
+    const wikiDir = path.join(REBAR_ROOT, "wiki");
+    if (fs.existsSync(wikiDir)) {
+      const countMd = (dir) => {
+        let count = 0;
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            count += countMd(path.join(dir, entry.name));
+          } else if (entry.name.endsWith(".md")) {
+            count++;
+          }
+        }
+        return count;
+      };
+      wikiPages = countMd(wikiDir);
+    }
+
+    // Count raw files
+    let rawFiles = 0;
+    const rawDir = path.join(REBAR_ROOT, "raw");
+    if (fs.existsSync(rawDir)) {
+      for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() && !entry.name.startsWith(".")) rawFiles++;
+      }
+    }
+
+    // Count commands
+    let commandCount = 0;
+    const commandsDir = path.join(REBAR_ROOT, ".claude", "commands");
+    if (fs.existsSync(commandsDir)) {
+      commandCount = fs.readdirSync(commandsDir).filter(f => f.endsWith(".md")).length;
+    }
+
+    const lines = [
+      "# Rebar Dashboard",
+      "",
+      `**Projects:** ${projects.length}`,
+      `**Slash Commands:** ${commandCount}`,
+      `**Wiki Pages:** ${wikiPages}`,
+      `**Pending Observations:** ${totalObs}`,
+      `**Raw Files Waiting:** ${rawFiles}`,
+      "",
+      "## Projects",
+      "",
+    ];
+    for (const p of projects) {
+      const obsNote = p.observation_count > 0 ? ` (${p.observation_count} pending obs)` : "";
+      lines.push(`- **${p.name}** (${p.type}) -- last updated ${p.last_updated || "never"}${obsNote}`);
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 

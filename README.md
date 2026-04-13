@@ -27,6 +27,8 @@ npx rebar-mcp
 | `rebar://wiki` | Wiki index (list of all pages with summaries) |
 | `rebar://wiki/{page}` | A specific wiki page |
 | `rebar://observations/{project}` | Unvalidated observations from expertise.yaml |
+| `rebar://commands` | List all available slash commands with descriptions |
+| `rebar://gotchas/{project}` | API gotchas from a project's expertise.yaml |
 
 ### Tools (actions)
 
@@ -36,6 +38,11 @@ npx rebar-mcp
 | `rebar_observe` | Append an observation to a project's unvalidated_observations |
 | `rebar_validate` | Check if an observation should be promoted, discarded, or deferred |
 | `rebar_search` | Search across all expertise files and wiki for a term |
+| `rebar_diff` | Show what changed in expertise.yaml since last session (git diff) |
+| `rebar_promote` | Promote an observation into a target section of expertise.yaml |
+| `rebar_discard` | Discard a stale observation with a reason |
+| `rebar_ingest` | List files in raw/ ready for wiki ingestion |
+| `rebar_stats` | Dashboard overview: projects, observations, wiki pages, last updated |
 
 ## Editor Setup
 
