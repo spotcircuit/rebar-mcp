@@ -1585,6 +1585,42 @@ server.tool(
   }
 );
 
+// Write-path allowlist for rebar_write_file
+const WRITE_ALLOWLIST = [
+  "CLAUDE.md",
+  "apps/**",
+  "clients/**",
+  "tools/**",
+  "wiki/**",
+  "raw/**",
+  "system/drafts/**",
+];
+
+function isWriteAllowed(relPath) {
+  // Normalize and reject path traversal
+  const normalized = path.normalize(relPath);
+  if (normalized.startsWith("..") || path.isAbsolute(relPath)) return false;
+
+  // Check against allowlist patterns
+  for (const pattern of WRITE_ALLOWLIST) {
+    if (pattern === normalized) return true;
+    if (pattern.endsWith("/**")) {
+      const prefix = pattern.slice(0, -3); // remove /**
+      if (normalized.startsWith(prefix + "/") || normalized === prefix) return true;
+    }
+  }
+
+  // Allow *.yaml and *.md in rebar project dirs (apps/, clients/, tools/)
+  const ext = path.extname(normalized);
+  if (ext === ".yaml" || ext === ".yml" || ext === ".md") {
+    for (const dir of ["apps", "clients", "tools"]) {
+      if (normalized.startsWith(dir + "/")) return true;
+    }
+  }
+
+  return false;
+}
+
 server.tool(
   "rebar_write_file",
   "Write any file in the rebar project (for creating source files, configs, etc.)",
@@ -1593,7 +1629,17 @@ server.tool(
     content: z.string().describe("Full file content to write"),
   },
   async ({ file_path, content }) => {
-    const fullPath = path.join(REBAR_ROOT, file_path);
+    const normalized = path.normalize(file_path);
+    if (!isWriteAllowed(normalized)) {
+      return {
+        content: [{
+          type: "text",
+          text: `Write rejected: '${file_path}' is outside the allowed paths.\n\nAllowed: CLAUDE.md, apps/**, clients/**, tools/**, wiki/**, raw/**, system/drafts/**, and *.yaml/*.md in project dirs.`,
+        }],
+        isError: true,
+      };
+    }
+    const fullPath = path.join(REBAR_ROOT, normalized);
     const dir = path.dirname(fullPath);
     fs.mkdirSync(dir, { recursive: true });
     const isUpdate = fs.existsSync(fullPath);
