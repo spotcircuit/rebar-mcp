@@ -1464,6 +1464,342 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Auto-Installer: detect editors and write MCP config
+// ---------------------------------------------------------------------------
+
+function getHomedir() {
+  return process.env.HOME || process.env.USERPROFILE || "";
+}
+
+function getPlatform() {
+  return process.platform; // 'linux', 'darwin', 'win32'
+}
+
+function editorDetectors() {
+  const home = getHomedir();
+  const platform = getPlatform();
+
+  const editors = [];
+
+  // --- Claude Desktop ---
+  const claudeDesktopConfigs = {
+    linux: path.join(home, ".config", "claude", "claude_desktop_config.json"),
+    darwin: path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
+    win32: path.join(process.env.APPDATA || "", "Claude", "claude_desktop_config.json"),
+  };
+  const claudeDesktopConfig = claudeDesktopConfigs[platform] || claudeDesktopConfigs.linux;
+  const claudeDesktopDetectPaths = {
+    linux: [path.join(home, ".config", "claude")],
+    darwin: ["/Applications/Claude.app", path.join(home, "Library", "Application Support", "Claude")],
+    win32: [path.join(process.env.LOCALAPPDATA || "", "Programs", "Claude")],
+  };
+  editors.push({
+    name: "Claude Desktop",
+    key: "claude-desktop",
+    configPath: claudeDesktopConfig,
+    serverKey: "mcpServers",
+    detectPaths: claudeDesktopDetectPaths[platform] || claudeDesktopDetectPaths.linux,
+    scope: "global",
+  });
+
+  // --- Cursor ---
+  editors.push({
+    name: "Cursor",
+    key: "cursor",
+    configPath: path.join(home, ".cursor", "mcp.json"),
+    serverKey: "mcpServers",
+    detectPaths: [
+      path.join(home, ".cursor"),
+      ...(platform === "darwin" ? ["/Applications/Cursor.app"] : []),
+      ...(platform === "win32" ? [path.join(process.env.LOCALAPPDATA || "", "Programs", "cursor")] : []),
+    ],
+    scope: "global",
+  });
+
+  // --- VS Code ---
+  const vscodeConfigs = {
+    linux: path.join(home, ".config", "Code", "User", "settings.json"),
+    darwin: path.join(home, "Library", "Application Support", "Code", "User", "settings.json"),
+    win32: path.join(process.env.APPDATA || "", "Code", "User", "settings.json"),
+  };
+  editors.push({
+    name: "VS Code",
+    key: "vscode",
+    configPath: vscodeConfigs[platform] || vscodeConfigs.linux,
+    serverKey: "mcp.servers",
+    detectPaths: [
+      path.join(home, ".vscode"),
+      ...(platform === "darwin" ? ["/Applications/Visual Studio Code.app"] : []),
+      ...(platform === "win32" ? [path.join(process.env.LOCALAPPDATA || "", "Programs", "Microsoft VS Code")] : []),
+    ],
+    scope: "global",
+    nested: true, // VS Code uses nested key: settings.json -> "mcp" -> "servers"
+  });
+
+  // --- Windsurf ---
+  editors.push({
+    name: "Windsurf",
+    key: "windsurf",
+    configPath: path.join(home, ".codeium", "windsurf", "mcp_config.json"),
+    serverKey: "mcpServers",
+    detectPaths: [
+      path.join(home, ".codeium", "windsurf"),
+      ...(platform === "darwin" ? ["/Applications/Windsurf.app"] : []),
+      ...(platform === "win32" ? [path.join(process.env.LOCALAPPDATA || "", "Programs", "Windsurf")] : []),
+    ],
+    scope: "global",
+  });
+
+  // --- Claude Code ---
+  editors.push({
+    name: "Claude Code",
+    key: "claude-code",
+    configPath: path.join(home, ".claude", "settings.json"),
+    serverKey: "mcpServers",
+    detectPaths: [path.join(home, ".claude")],
+    scope: "global",
+  });
+
+  return editors;
+}
+
+function detectInstalledEditors() {
+  const editors = editorDetectors();
+  const detected = [];
+  for (const editor of editors) {
+    let found = false;
+    // Check if config file already exists
+    if (fs.existsSync(editor.configPath)) {
+      found = true;
+    }
+    // Check detect paths
+    if (!found) {
+      for (const dp of editor.detectPaths) {
+        if (fs.existsSync(dp)) {
+          found = true;
+          break;
+        }
+      }
+    }
+    // Check PATH for CLI commands
+    if (!found) {
+      const cliNames = {
+        "claude-desktop": [],
+        "cursor": ["cursor"],
+        "vscode": ["code", "code-insiders"],
+        "windsurf": ["windsurf"],
+        "claude-code": ["claude"],
+      };
+      for (const cmd of (cliNames[editor.key] || [])) {
+        try {
+          execSync(`which ${cmd} 2>/dev/null || where ${cmd} 2>nul`, { encoding: "utf8", timeout: 3000 });
+          found = true;
+          break;
+        } catch (_) {}
+      }
+    }
+    if (found) {
+      detected.push(editor);
+    }
+  }
+  return detected;
+}
+
+function buildRebarMcpEntry(rebarRoot) {
+  return {
+    command: "npx",
+    args: ["-y", "@spotcircuit/rebar-mcp"],
+    env: {
+      REBAR_ROOT: rebarRoot,
+    },
+  };
+}
+
+function installForEditor(editor, rebarRoot, dryRun) {
+  const entry = buildRebarMcpEntry(rebarRoot);
+  const configPath = editor.configPath;
+  const configDir = path.dirname(configPath);
+
+  // Read existing config or start fresh
+  let config = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    } catch (_) {
+      // Corrupted config — back it up and start fresh
+      if (!dryRun) {
+        const backupPath = configPath + ".bak." + Date.now();
+        fs.copyFileSync(configPath, backupPath);
+      }
+      config = {};
+    }
+  }
+
+  // VS Code uses nested "mcp.servers" inside settings.json
+  if (editor.nested) {
+    if (!config.mcp) config.mcp = {};
+    if (!config.mcp.servers) config.mcp.servers = {};
+    if (config.mcp.servers["rebar-mcp"]) {
+      return { status: "already_configured", configPath };
+    }
+    if (!dryRun) {
+      config.mcp.servers["rebar-mcp"] = entry;
+    }
+  } else {
+    if (!config[editor.serverKey]) config[editor.serverKey] = {};
+    if (config[editor.serverKey]["rebar-mcp"]) {
+      return { status: "already_configured", configPath };
+    }
+    if (!dryRun) {
+      config[editor.serverKey]["rebar-mcp"] = entry;
+    }
+  }
+
+  if (!dryRun) {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+  }
+
+  return { status: "installed", configPath };
+}
+
+server.tool(
+  "rebar_install",
+  "One-command auto-installer: detects installed AI editors (Claude Desktop, Cursor, VS Code, Windsurf, Claude Code), writes MCP config for each, and scaffolds rebar if needed. Run with dry_run=true to preview without changes.",
+  {
+    dry_run: z.boolean().optional().describe("Preview what would be configured without writing files (default: false)"),
+    editors: z.array(z.string()).optional().describe("Only install for these editors (e.g. ['cursor', 'vscode']). Omit to auto-detect all."),
+  },
+  async ({ dry_run, editors: editorFilter }) => {
+    const dryRun = dry_run || false;
+    const root = REBAR_ROOT;
+    const results = [];
+
+    // Step 1: Detect editors
+    let detected;
+    if (editorFilter && editorFilter.length > 0) {
+      const all = editorDetectors();
+      detected = all.filter(e => editorFilter.includes(e.key) || editorFilter.includes(e.name.toLowerCase()));
+      // Warn about unrecognized filters
+      const validKeys = all.map(e => e.key);
+      for (const f of editorFilter) {
+        if (!validKeys.includes(f) && !all.some(e => e.name.toLowerCase() === f)) {
+          results.push(`⚠ Unknown editor '${f}'. Valid: ${validKeys.join(", ")}`);
+        }
+      }
+    } else {
+      detected = detectInstalledEditors();
+    }
+
+    if (detected.length === 0) {
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "No supported AI editors detected.",
+            "",
+            "Supported editors: Claude Desktop, Cursor, VS Code, Windsurf, Claude Code",
+            "",
+            "If your editor is installed but not detected, use the `editors` parameter:",
+            '  rebar_install({ editors: ["cursor"] })',
+          ].join("\n"),
+        }],
+      };
+    }
+
+    // Step 2: Install for each detected editor
+    const installed = [];
+    const skipped = [];
+    const failed = [];
+
+    for (const editor of detected) {
+      try {
+        const result = installForEditor(editor, root, dryRun);
+        if (result.status === "already_configured") {
+          skipped.push({ name: editor.name, configPath: result.configPath });
+        } else {
+          installed.push({ name: editor.name, configPath: result.configPath });
+        }
+      } catch (e) {
+        failed.push({ name: editor.name, error: e.message });
+      }
+    }
+
+    // Step 3: Scaffold rebar if needed (only if not dry run)
+    let scaffolded = false;
+    if (!dryRun) {
+      const claudeMd = path.join(root, "CLAUDE.md");
+      if (!fs.existsSync(claudeMd) || !fs.existsSync(path.join(root, "apps"))) {
+        // Trigger rebar_init logic inline
+        for (const dir of ["apps/_templates", "clients/_templates", "tools/_templates", "wiki", "raw/processed"]) {
+          const fullDir = path.join(root, dir);
+          if (!fs.existsSync(fullDir)) {
+            fs.mkdirSync(fullDir, { recursive: true });
+          }
+        }
+        scaffolded = true;
+      }
+    }
+
+    // Build response
+    const lines = [];
+    if (dryRun) {
+      lines.push("# Rebar Install (DRY RUN — no files written)");
+    } else {
+      lines.push("# Rebar Install Complete");
+    }
+    lines.push("");
+
+    if (installed.length > 0) {
+      lines.push(`## ${dryRun ? "Would configure" : "Configured"} (${installed.length})`);
+      for (const i of installed) {
+        lines.push(`- **${i.name}** → \`${i.configPath}\``);
+      }
+      lines.push("");
+    }
+
+    if (skipped.length > 0) {
+      lines.push(`## Already configured (${skipped.length})`);
+      for (const s of skipped) {
+        lines.push(`- **${s.name}** → \`${s.configPath}\``);
+      }
+      lines.push("");
+    }
+
+    if (failed.length > 0) {
+      lines.push(`## Failed (${failed.length})`);
+      for (const f of failed) {
+        lines.push(`- **${f.name}**: ${f.error}`);
+      }
+      lines.push("");
+    }
+
+    if (scaffolded) {
+      lines.push("## Rebar scaffolded");
+      lines.push("Created apps/, clients/, tools/, wiki/, raw/ directories.");
+      lines.push("");
+    }
+
+    if (results.length > 0) {
+      lines.push(results.join("\n"));
+      lines.push("");
+    }
+
+    const allEditors = detected.map(e => e.name).join(", ");
+    lines.push("---");
+    lines.push(`Detected editors: ${allEditors}`);
+    lines.push(`Rebar root: ${root}`);
+
+    if (!dryRun && installed.length > 0) {
+      lines.push("");
+      lines.push("**Next:** Restart your editor(s) to activate rebar-mcp. Then use `rebar_discover` to scan your codebase.");
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 async function main() {

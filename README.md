@@ -4,7 +4,17 @@ MCP server for [Rebar](https://github.com/spotcircuit/rebar) -- project intellig
 
 **No Claude Code required.** This MCP server gives Cursor, Windsurf, VS Code Copilot, and any MCP-compatible editor full access to rebar's knowledge system: expertise files, wiki, observations, and the self-learn loop.
 
-## Quick Start (Cursor)
+## Quick Start
+
+**Auto-install (recommended):** If you already have rebar-mcp connected to any editor, ask your AI to run:
+
+```
+rebar_install
+```
+
+This auto-detects all installed AI editors (Claude Desktop, Cursor, VS Code, Windsurf, Claude Code) and writes the correct MCP config for each one. Use `dry_run: true` to preview first.
+
+**Manual setup (Cursor example):**
 
 ```bash
 # In your project directory:
@@ -21,8 +31,8 @@ cat > .cursor/mcp.json << 'EOF'
 EOF
 ```
 
-Then in Cursor, ask your AI to:
-1. `rebar_init` — scaffold rebar into your project
+Then in any editor, ask your AI to:
+1. `rebar_install` — auto-configure all your other editors too
 2. `rebar_discover my-app` — scan your codebase, generate expertise.yaml
 3. Fill in the expertise based on the scan results
 4. `rebar_improve my-app` — validate observations over time
@@ -61,6 +71,7 @@ These replace the Claude Code slash commands. Your AI calls them directly.
 
 | Tool | Replaces | Description |
 |---|---|---|
+| `rebar_install` | — | Auto-detect editors and write MCP config for each (one-command setup) |
 | `rebar_init` | `npx create-rebar` | Scaffold rebar into the current project |
 | `rebar_discover` | `/discover` | Scan codebase, generate expertise.yaml with project analysis |
 | `rebar_plan` | `/plan` | Create an implementation plan, saved to specs/ |
