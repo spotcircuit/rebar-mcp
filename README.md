@@ -63,13 +63,16 @@ These replace the Claude Code slash commands. Your AI calls them directly.
 |---|---|---|
 | `rebar_init` | `npx create-rebar` | Scaffold rebar into the current project |
 | `rebar_discover` | `/discover` | Scan codebase, generate expertise.yaml with project analysis |
+| `rebar_plan` | `/plan` | Create an implementation plan, saved to specs/ |
+| `rebar_build` | `/build` | Read a plan from specs/ and return it as build instructions |
 | `rebar_improve` | `/improve` | Review unvalidated observations with context for promote/discard/defer |
 | `rebar_brief_tool` | `/brief` | Generate a standup/handoff summary |
-| `rebar_write_expertise` | — | Write or update a project's expertise.yaml |
-| `rebar_wiki_ingest` | `/wiki-ingest` | Scan raw/ files, return contents for the AI to create wiki pages |
+| `rebar_write_expertise` | — | Write or update a project's expertise.yaml (validates YAML) |
+| `rebar_wiki_ingest` | `/wiki-ingest` | Read a raw/ file and return contents for wiki processing |
 | `rebar_wiki_write` | — | Write a wiki page to wiki/{category}/{page}.md |
 | `rebar_wiki_move_processed` | — | Move a processed raw file to raw/processed/ |
-| `rebar_read_file` | — | Read any file in the project (code, configs, etc.) |
+| `rebar_read_file` | — | Read any file in the project |
+| `rebar_write_file` | — | Write any file in the project |
 
 ### Tools — Knowledge Management
 
@@ -164,11 +167,13 @@ You can also set the `REBAR_ROOT` environment variable to point at your project 
 The same loop works via MCP tools:
 
 ```
-1. rebar_discover my-app     → scans codebase, creates expertise.yaml
-2. (work on your project)    → AI notices things, calls rebar_observe
-3. rebar_improve my-app      → reviews observations, returns context
-4. rebar_promote / discard   → AI validates each observation
-5. rebar_brief_tool my-app   → next session starts with full context
+1. rebar_init                → scaffold rebar into the project
+2. rebar_discover my-app     → scan codebase, create expertise.yaml
+3. rebar_plan my-app         → create implementation plan in specs/
+4. rebar_build my-app        → read plan, build it, observe what you learn
+5. rebar_observe my-app      → capture gotchas and patterns during work
+6. rebar_improve my-app      → validate observations, promote or discard
+7. rebar_brief_tool my-app   → next session starts with full context
 ```
 
 Every session, your AI reads expertise.yaml (via `rebar://expertise/my-app`) and starts with full project context. Observations compound. Stale facts get discarded. Your AI gets smarter about your project over time.

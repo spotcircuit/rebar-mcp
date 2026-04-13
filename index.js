@@ -1135,72 +1135,53 @@ server.tool(
 
 server.tool(
   "rebar_wiki_ingest",
-  "Scan raw/ for unprocessed files, return their contents so the AI can create wiki pages. After processing, call rebar_wiki_write for each page and rebar_wiki_move_processed for each source file.",
-  {},
-  async () => {
+  "Read a specific file from raw/ and return its contents for the AI to process into wiki knowledge. The AI should then call rebar_wiki_write to save pages and rebar_wiki_move_processed to archive the source.",
+  {
+    filename: z.string().optional().describe("Specific file to ingest from raw/. If omitted, lists available files."),
+  },
+  async ({ filename }) => {
     const rawDir = path.join(REBAR_ROOT, "raw");
     if (!fs.existsSync(rawDir)) {
-      return { content: [{ type: "text", text: "No raw/ directory found." }] };
+      return { content: [{ type: "text", text: "No raw/ directory found. Run rebar_init first." }] };
     }
 
-    const files = [];
-    for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) continue;
-      if (entry.name.startsWith(".")) continue;
-      const ext = path.extname(entry.name).toLowerCase();
-      if (![".md", ".txt", ".html", ".htm"].includes(ext)) continue;
-      const fullPath = path.join(rawDir, entry.name);
-      try {
-        const content = fs.readFileSync(fullPath, "utf8");
-        const stat = fs.statSync(fullPath);
-        files.push({
-          name: entry.name,
-          size: stat.size,
-          content: content.substring(0, 10000),
-        });
-      } catch (_) {}
+    // If no filename, list what's available
+    if (!filename) {
+      const available = [];
+      for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) continue;
+        if (entry.name.startsWith(".")) continue;
+        available.push(entry.name);
+      }
+      if (available.length === 0) {
+        return { content: [{ type: "text", text: "No files in raw/. Drop files there first." }] };
+      }
+      return { content: [{ type: "text", text: `Files ready for ingestion:\n${available.map(f => `- ${f}`).join("\n")}\n\nCall rebar_wiki_ingest with a specific filename to process it.` }] };
     }
 
-    if (files.length === 0) {
-      return { content: [{ type: "text", text: "No files to process in raw/." }] };
+    // Read the specific file
+    const filePath = path.join(rawDir, filename);
+    if (!fs.existsSync(filePath)) {
+      return { content: [{ type: "text", text: `File raw/${filename} not found.` }], isError: true };
     }
 
-    // Return file contents for the AI to process
-    const output = [
-      `# Wiki Ingest: ${files.length} file(s) to process`,
-      "",
-      "For each file, create wiki pages using `rebar_wiki_write`. Then move the source using `rebar_wiki_move_processed`.",
-      "",
-      "## Wiki page format",
-      "",
-      "```markdown",
-      "# Page Title",
-      "",
-      "#tag1 #tag2 #category",
-      "",
-      "Content here. One concept per page.",
-      "",
-      "## Related",
-      "",
-      "- [[other-page]]",
-      "",
-      "---",
-      "Source: raw/filename.md | Ingested: YYYY-MM-DD",
-      "```",
-      "",
-      "## Categories: platform/, patterns/, decisions/, clients/, people/",
-      "",
-    ];
+    const content = fs.readFileSync(filePath, "utf8");
+    const today = new Date().toISOString().split("T")[0];
 
-    for (const file of files) {
-      output.push(`---`);
-      output.push(`## ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
-      output.push("");
-      output.push(file.content);
-      output.push("");
-    }
-
-    return { content: [{ type: "text", text: output.join("\n") }] };
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `# Source: raw/${filename}`,
+          "",
+          content.substring(0, 15000),
+          "",
+          "---",
+          "",
+          `Create wiki pages from this content using rebar_wiki_write (categories: platform, patterns, decisions, clients, people). One concept per page. Then call rebar_wiki_move_processed with filename "${filename}" to archive it.`,
+        ].join("\n"),
+      }],
+    };
   }
 );
 
@@ -1277,6 +1258,156 @@ server.tool(
     } catch (e) {
       return { content: [{ type: "text", text: `Error reading ${file_path}: ${e.message}` }], isError: true };
     }
+  }
+);
+
+server.tool(
+  "rebar_plan",
+  "Create an implementation plan. Reads expertise.yaml for project context, then saves the plan to apps/{project}/specs/{plan-name}.md. Returns the plan for the AI to review.",
+  {
+    project: z.string().describe("Project name"),
+    plan_name: z.string().describe("Plan filename in kebab-case (e.g. 'add-auth', 'refactor-api')"),
+    requirements: z.string().describe("What needs to be built — features, constraints, goals"),
+  },
+  async ({ project, plan_name, requirements }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found. Run rebar_discover first.` }], isError: true };
+    }
+
+    // Read expertise for context
+    const expertise = readExpertise(REBAR_ROOT, project);
+    const expertiseContext = expertise ? expertise.substring(0, 5000) : "No expertise.yaml found.";
+
+    // Create specs dir
+    const specsDir = path.join(projDir, "specs");
+    fs.mkdirSync(specsDir, { recursive: true });
+
+    const today = new Date().toISOString().split("T")[0];
+    const planPath = path.join(specsDir, `${plan_name}.md`);
+
+    // Write plan skeleton
+    const planContent = [
+      `# ${plan_name.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}`,
+      "",
+      `Created: ${today}`,
+      `Project: ${project}`,
+      "",
+      "## Requirements",
+      "",
+      requirements,
+      "",
+      "## Project Context (from expertise.yaml)",
+      "",
+      "```yaml",
+      expertiseContext,
+      "```",
+      "",
+      "## Implementation Plan",
+      "",
+      "<!-- AI: Fill in the implementation steps based on the requirements and project context above -->",
+      "",
+      "## Files to Create/Modify",
+      "",
+      "<!-- AI: List specific files that need changes -->",
+      "",
+      "## Success Criteria",
+      "",
+      "<!-- AI: Define what done looks like -->",
+      "",
+    ].join("\n");
+
+    fs.writeFileSync(planPath, planContent, "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `Plan saved to ${path.relative(REBAR_ROOT, planPath)}`,
+          "",
+          "## Project Expertise",
+          "",
+          expertiseContext,
+          "",
+          "## Requirements",
+          "",
+          requirements,
+          "",
+          "---",
+          "",
+          "Fill in the Implementation Plan, Files to Create/Modify, and Success Criteria sections. Then use rebar_build to implement it.",
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_build",
+  "Read a plan from specs/ and return it as implementation instructions. After building, the AI should call rebar_observe to capture what it learned.",
+  {
+    project: z.string().describe("Project name"),
+    plan_name: z.string().describe("Plan filename without .md (e.g. 'add-auth')"),
+  },
+  async ({ project, plan_name }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+
+    const planPath = path.join(projDir, "specs", `${plan_name}.md`);
+    if (!fs.existsSync(planPath)) {
+      // List available plans
+      const specsDir = path.join(projDir, "specs");
+      if (fs.existsSync(specsDir)) {
+        const plans = fs.readdirSync(specsDir).filter(f => f.endsWith(".md"));
+        return {
+          content: [{
+            type: "text",
+            text: `Plan '${plan_name}' not found. Available plans:\n${plans.map(p => `- ${p.replace(".md", "")}`).join("\n")}`,
+          }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: `No specs/ directory found for '${project}'. Run rebar_plan first.` }], isError: true };
+    }
+
+    const plan = fs.readFileSync(planPath, "utf8");
+
+    // Read expertise for additional context
+    const expertise = readExpertise(REBAR_ROOT, project);
+
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `# Build: ${plan_name}`,
+          "",
+          plan,
+          "",
+          "---",
+          "",
+          "Implement the plan above. After building, call rebar_observe for any gotchas, patterns, or decisions discovered during implementation.",
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "rebar_write_file",
+  "Write any file in the rebar project (for creating source files, configs, etc.)",
+  {
+    file_path: z.string().describe("Relative path from project root (e.g. 'src/auth.ts', 'apps/my-app/notes.md')"),
+    content: z.string().describe("Full file content to write"),
+  },
+  async ({ file_path, content }) => {
+    const fullPath = path.join(REBAR_ROOT, file_path);
+    const dir = path.dirname(fullPath);
+    fs.mkdirSync(dir, { recursive: true });
+    const isUpdate = fs.existsSync(fullPath);
+    fs.writeFileSync(fullPath, content, "utf8");
+    return { content: [{ type: "text", text: `${isUpdate ? "Updated" : "Created"} ${file_path}` }] };
   }
 );
 

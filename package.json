@@ -1,6 +1,6 @@
 {
   "name": "@spotcircuit/rebar-mcp",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "MCP server for Rebar — serve project expertise to any AI editor",
   "main": "index.js",
   "bin": {
