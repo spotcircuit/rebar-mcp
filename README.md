@@ -74,12 +74,15 @@ Your AI calls these directly. Five verbs cover everything:
 | Tool | Description |
 |---|---|
 | `rebar_install` | Auto-detect editors and write MCP config for each |
+| `rebar_config` | Generate the MCP config snippet for a specific editor (read-only) |
 | `rebar_init` | Scaffold rebar into the current project |
 
 #### 📖 Learn — Build project knowledge
 
 | Tool | Description |
 |---|---|
+| `rebar_session_start` | Load project context for a warm start (expertise, observations, recent changes) |
+| `rebar_session_end` | Summarize session accomplishments, auto-append observations |
 | `rebar_discover` | Scan codebase, generate expertise.yaml with project analysis |
 | `rebar_observe` | Append an observation to unvalidated_observations |
 | `rebar_improve` | Review unvalidated observations — promote, discard, or defer |

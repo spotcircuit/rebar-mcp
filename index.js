@@ -2313,6 +2313,198 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Session Lifecycle — warm start / session summary
+// ---------------------------------------------------------------------------
+server.tool(
+  "rebar_session_start",
+  "Load project context for a warm start: expertise summary, recent observations, recent git changes, and wiki highlights. Call this at the beginning of every session.",
+  {
+    project: z.string().describe("Project name (e.g. 'my-app')"),
+  },
+  async ({ project }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+
+    const sections = [];
+
+    // 1. Brief from expertise
+    const data = parseExpertise(REBAR_ROOT, project);
+    if (data) {
+      sections.push(generateBrief(data));
+    } else {
+      sections.push(`# ${project}\n\nNo expertise.yaml found. Run rebar_discover to generate one.`);
+    }
+
+    // 2. Unvalidated observations
+    if (data && data.unvalidated_observations && data.unvalidated_observations.length > 0) {
+      sections.push("## Pending Observations");
+      sections.push(`${data.unvalidated_observations.length} observation(s) awaiting validation. Run rebar_improve to review them.`);
+    }
+
+    // 3. Recent git activity
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    if (fs.existsSync(expertisePath)) {
+      const relPath = path.relative(REBAR_ROOT, expertisePath);
+      try {
+        const recentCommits = execSync(
+          `git log --oneline -5 -- "${path.relative(REBAR_ROOT, projDir)}"`,
+          { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 }
+        ).trim();
+        if (recentCommits) {
+          sections.push("## Recent Commits");
+          sections.push(recentCommits);
+        }
+      } catch (_) {}
+
+      // Uncommitted changes
+      try {
+        const diff = execSync(
+          `git diff --stat -- "${path.relative(REBAR_ROOT, projDir)}"`,
+          { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 }
+        ).trim();
+        if (diff) {
+          sections.push("## Uncommitted Changes");
+          sections.push(diff);
+        }
+      } catch (_) {}
+    }
+
+    // 4. Wiki highlights (first 5 pages from index)
+    const wikiIndex = getWikiIndex(REBAR_ROOT);
+    if (wikiIndex) {
+      const lines = wikiIndex.split("\n").filter(l => l.startsWith("- ")).slice(0, 5);
+      if (lines.length > 0) {
+        sections.push("## Wiki (top pages)");
+        sections.push(lines.join("\n"));
+      }
+    }
+
+    sections.push("\n---\n*Session started. When done, call rebar_session_end to capture what you accomplished.*");
+
+    return { content: [{ type: "text", text: sections.join("\n\n") }] };
+  }
+);
+
+server.tool(
+  "rebar_session_end",
+  "Summarize what was accomplished in this session and auto-append observations to expertise.yaml. Call at the end of every session.",
+  {
+    project: z.string().describe("Project name"),
+    summary: z.string().describe("Brief summary of what was accomplished this session"),
+    observations: z.array(z.string()).optional().describe("Specific observations to record (facts learned, gotchas found, decisions made)"),
+  },
+  async ({ project, summary, observations }) => {
+    const projDir = resolveProjectDir(REBAR_ROOT, project);
+    if (!projDir) {
+      return { content: [{ type: "text", text: `Project '${project}' not found.` }], isError: true };
+    }
+
+    const expertisePath = path.join(projDir, "expertise.yaml");
+    const results = [];
+
+    // Build observations list from summary + explicit observations
+    const allObs = [];
+    allObs.push(`[session-end ${new Date().toISOString().slice(0, 10)}] ${summary}`);
+    if (observations && observations.length > 0) {
+      for (const obs of observations) {
+        allObs.push(obs);
+      }
+    }
+
+    // Append to expertise.yaml
+    if (fs.existsSync(expertisePath)) {
+      try {
+        const data = yaml.load(fs.readFileSync(expertisePath, "utf8")) || {};
+        if (!data.unvalidated_observations) data.unvalidated_observations = [];
+        for (const obs of allObs) {
+          data.unvalidated_observations.push(obs);
+        }
+        data.last_updated = new Date().toISOString().slice(0, 10);
+        fs.writeFileSync(expertisePath, yaml.dump(data, { lineWidth: 120, noRefs: true }), "utf8");
+        results.push(`Appended ${allObs.length} observation(s) to ${project}/expertise.yaml.`);
+      } catch (e) {
+        results.push(`Error updating expertise.yaml: ${e.message}`);
+      }
+    } else {
+      results.push(`No expertise.yaml found for '${project}'. Observations not saved. Run rebar_discover first.`);
+    }
+
+    // Show recent git diff for the session recap
+    try {
+      const diff = execSync(
+        `git diff --stat -- "${path.relative(REBAR_ROOT, projDir)}"`,
+        { cwd: REBAR_ROOT, encoding: "utf8", timeout: 5000 }
+      ).trim();
+      if (diff) {
+        results.push(`\nUncommitted changes this session:\n${diff}`);
+      }
+    } catch (_) {}
+
+    results.push(`\nSession ended. Run rebar_improve ${project} to validate new observations.`);
+
+    return { content: [{ type: "text", text: results.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Multi-Editor Config Generator — output config snippets without writing
+// ---------------------------------------------------------------------------
+server.tool(
+  "rebar_config",
+  "Generate the MCP config snippet for a specific editor. Returns JSON you can paste into your editor's config file — does not write anything. Use rebar_install to auto-configure instead.",
+  {
+    editor: z.string().describe("Editor key: cursor, vscode, windsurf, claude-desktop, claude-code"),
+  },
+  async ({ editor: editorKey }) => {
+    const key = editorKey.toLowerCase().replace(/\s+/g, "-");
+    const allEditors = editorDetectors();
+    const match = allEditors.find(e => e.key === key || e.name.toLowerCase() === key);
+
+    if (!match) {
+      const validKeys = allEditors.map(e => e.key).join(", ");
+      return {
+        content: [{ type: "text", text: `Unknown editor '${editorKey}'. Valid editors: ${validKeys}` }],
+        isError: true,
+      };
+    }
+
+    const entry = buildRebarMcpEntry(REBAR_ROOT);
+    let snippet;
+
+    if (match.nested) {
+      // VS Code style — nested under mcp.servers in settings.json
+      snippet = {
+        "mcp.servers": {
+          "rebar-mcp": entry,
+        },
+      };
+    } else {
+      // Cursor / Windsurf / Claude Desktop style
+      const wrapper = {};
+      wrapper[match.serverKey] = { "rebar-mcp": entry };
+      snippet = wrapper;
+    }
+
+    const lines = [];
+    lines.push(`## ${match.name} — MCP Config`);
+    lines.push("");
+    lines.push(`**Config file:** \`${match.configPath}\``);
+    lines.push("");
+    lines.push("Add or merge this into your config:");
+    lines.push("");
+    lines.push("```json");
+    lines.push(JSON.stringify(snippet, null, 2));
+    lines.push("```");
+    lines.push("");
+    lines.push(`Or run \`rebar_install\` to auto-configure all detected editors.`);
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 async function main() {
