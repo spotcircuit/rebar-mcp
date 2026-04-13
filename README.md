@@ -34,7 +34,7 @@ npx rebar-mcp
 
 | Tool | Description |
 |---|---|
-| `rebar_list_projects` | List all projects (apps/ + clients/) with basic info |
+| `rebar_list_projects` | List all projects (apps/ + clients/ + tools/) with basic info |
 | `rebar_observe` | Append an observation to a project's unvalidated_observations |
 | `rebar_validate` | Check if an observation should be promoted, discarded, or deferred |
 | `rebar_search` | Search across all expertise files and wiki for a term |
@@ -150,7 +150,7 @@ npx @modelcontextprotocol/inspector node index.js
 
 The server reads directly from the Rebar filesystem structure:
 
-- `apps/{project}/expertise.yaml` and `clients/{project}/expertise.yaml` for project knowledge
+- `apps/{project}/expertise.yaml`, `clients/{project}/expertise.yaml`, and `tools/{project}/expertise.yaml` for project knowledge
 - `wiki/` for synthesized knowledge pages
 - The self-learn loop: observations appended via `rebar_observe` get validated by `/improve`
 

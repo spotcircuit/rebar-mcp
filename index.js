@@ -60,7 +60,7 @@ function getRebarRoot() {
 
 function listProjects(root) {
   const projects = [];
-  for (const type of ["apps", "clients"]) {
+  for (const type of ["apps", "clients", "tools"]) {
     const dir = path.join(root, type);
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
@@ -88,7 +88,7 @@ function listProjects(root) {
 }
 
 function resolveProjectDir(root, project) {
-  for (const type of ["apps", "clients"]) {
+  for (const type of ["apps", "clients", "tools"]) {
     const dir = path.join(root, type, project);
     if (fs.existsSync(dir)) return dir;
   }
@@ -412,7 +412,7 @@ server.resource(
 
 server.tool(
   "rebar_list_projects",
-  "List all projects (apps/ + clients/) with basic info",
+  "List all projects (apps/ + clients/ + tools/) with basic info",
   {},
   async () => {
     const projects = listProjects(REBAR_ROOT);
