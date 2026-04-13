@@ -81,6 +81,7 @@ Your AI calls these directly. Five verbs cover everything:
 
 | Tool | Description |
 |---|---|
+| `rebar_quickstart` | **One-call onboarding** — scans codebase, generates expertise.yaml, produces brief, extracts gotchas, suggests first plan. The full first-run experience. |
 | `rebar_session_start` | Load project context for a warm start (expertise, observations, recent changes) |
 | `rebar_session_end` | Summarize session accomplishments, auto-append observations |
 | `rebar_discover` | Scan codebase, generate expertise.yaml with project analysis |

@@ -3005,6 +3005,345 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// rebar_quickstart — one-call onboarding: discover + brief + gotchas + plan
+// ---------------------------------------------------------------------------
+server.tool(
+  "rebar_quickstart",
+  "Full first-run experience in one call: scans codebase, generates expertise.yaml, produces brief, extracts gotchas, and suggests a first plan. The onboarding dopamine hit.",
+  {
+    project: z.string().describe("Project name to create under apps/ (e.g. 'my-app')"),
+  },
+  async ({ project }) => {
+    const root = REBAR_ROOT;
+    const projDir = path.join(root, "apps", project);
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.mkdirSync(path.join(projDir, "specs"), { recursive: true });
+
+    // -----------------------------------------------------------------------
+    // 1. DISCOVER — scan the codebase for context
+    // -----------------------------------------------------------------------
+    const analysis = [];
+
+    // Package files
+    for (const pkg of ["package.json", "requirements.txt", "Cargo.toml", "go.mod", "pyproject.toml", "Gemfile", "pom.xml", "build.gradle"]) {
+      const pkgPath = path.join(root, pkg);
+      if (fs.existsSync(pkgPath)) {
+        try {
+          analysis.push({ file: pkg, content: fs.readFileSync(pkgPath, "utf8").substring(0, 3000) });
+        } catch (_) {}
+      }
+    }
+
+    // README
+    for (const readme of ["README.md", "readme.md", "README.rst"]) {
+      const readmePath = path.join(root, readme);
+      if (fs.existsSync(readmePath)) {
+        try {
+          analysis.push({ file: readme, content: fs.readFileSync(readmePath, "utf8").substring(0, 3000) });
+        } catch (_) {}
+        break;
+      }
+    }
+
+    // Directory structure (top 3 levels)
+    const tree = [];
+    function walkDirQS(dir, depth, maxDepth) {
+      if (depth >= maxDepth) return;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "__pycache__" || entry.name === ".git" || entry.name === "venv" || entry.name === ".venv" || entry.name === "dist" || entry.name === "build") continue;
+          const relPath = path.relative(root, path.join(dir, entry.name));
+          tree.push({ path: relPath, type: entry.isDirectory() ? "dir" : "file" });
+          if (entry.isDirectory()) walkDirQS(path.join(dir, entry.name), depth + 1, maxDepth);
+        }
+      } catch (_) {}
+    }
+    walkDirQS(root, 0, 3);
+
+    // Config files
+    for (const config of ["tsconfig.json", "vite.config.ts", "vite.config.js", "next.config.js", "next.config.ts", "webpack.config.js", "tailwind.config.js", "tailwind.config.ts", "docker-compose.yml", "Dockerfile", ".env.example", "Makefile"]) {
+      const configPath = path.join(root, config);
+      if (fs.existsSync(configPath)) {
+        try {
+          analysis.push({ file: config, content: fs.readFileSync(configPath, "utf8").substring(0, 1500) });
+        } catch (_) {}
+      }
+    }
+
+    // Entry points
+    for (const entry of ["src/index.ts", "src/index.js", "src/main.ts", "src/main.py", "app/page.tsx", "app/layout.tsx", "main.py", "main.go", "src/lib.rs", "index.js", "index.ts"]) {
+      const entryPath = path.join(root, entry);
+      if (fs.existsSync(entryPath)) {
+        try {
+          analysis.push({ file: entry, content: fs.readFileSync(entryPath, "utf8").substring(0, 2000) });
+        } catch (_) {}
+      }
+    }
+
+    // CI/CD files
+    for (const ci of [".github/workflows/ci.yml", ".github/workflows/deploy.yml", ".gitlab-ci.yml", "Jenkinsfile"]) {
+      const ciPath = path.join(root, ci);
+      if (fs.existsSync(ciPath)) {
+        try {
+          analysis.push({ file: ci, content: fs.readFileSync(ciPath, "utf8").substring(0, 1500) });
+        } catch (_) {}
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. GENERATE expertise.yaml — richer than plain discover
+    // -----------------------------------------------------------------------
+    const today = new Date().toISOString().split("T")[0];
+    const expertisePath = path.join(projDir, "expertise.yaml");
+
+    // Detect language/framework from scanned files
+    const detectedStack = [];
+    const fileNames = analysis.map(a => a.file);
+    if (fileNames.includes("package.json")) {
+      try {
+        const pkg = JSON.parse(analysis.find(a => a.file === "package.json").content);
+        const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+        if (allDeps.react) detectedStack.push("React");
+        if (allDeps.next) detectedStack.push("Next.js");
+        if (allDeps.vue) detectedStack.push("Vue");
+        if (allDeps.svelte) detectedStack.push("Svelte");
+        if (allDeps.express) detectedStack.push("Express");
+        if (allDeps.fastify) detectedStack.push("Fastify");
+        if (allDeps.typescript) detectedStack.push("TypeScript");
+        if (allDeps.tailwindcss) detectedStack.push("Tailwind CSS");
+        if (allDeps.prisma || allDeps["@prisma/client"]) detectedStack.push("Prisma");
+        if (allDeps.drizzle || allDeps["drizzle-orm"]) detectedStack.push("Drizzle");
+        if (allDeps.pg || allDeps.postgres) detectedStack.push("PostgreSQL");
+        if (allDeps["better-sqlite3"] || allDeps.sqlite3) detectedStack.push("SQLite");
+        if (allDeps.mongoose || allDeps.mongodb) detectedStack.push("MongoDB");
+      } catch (_) {}
+    }
+    if (fileNames.includes("requirements.txt") || fileNames.includes("pyproject.toml")) detectedStack.push("Python");
+    if (fileNames.includes("Cargo.toml")) detectedStack.push("Rust");
+    if (fileNames.includes("go.mod")) detectedStack.push("Go");
+    if (fileNames.includes("pom.xml") || fileNames.includes("build.gradle")) detectedStack.push("Java");
+    if (fileNames.includes("Dockerfile")) detectedStack.push("Docker");
+
+    // Detect gotchas from code patterns
+    const gotchas = [];
+    for (const a of analysis) {
+      // Env var usage without defaults
+      const envMatches = a.content.match(/process\.env\.(\w+)/g);
+      if (envMatches && envMatches.length > 3) {
+        const uniqueVars = [...new Set(envMatches)].slice(0, 8);
+        gotchas.push({ gotcha: "Environment variables", detail: `Uses ${uniqueVars.length}+ env vars: ${uniqueVars.join(", ")}. Check .env.example for required values.` });
+      }
+      // Port bindings
+      const portMatch = a.content.match(/(?:PORT|port)\s*(?:=|:)\s*(\d{4,5})/);
+      if (portMatch) {
+        gotchas.push({ gotcha: `Port ${portMatch[1]}`, detail: `${a.file} binds to port ${portMatch[1]}` });
+      }
+    }
+    // Docker gotcha
+    if (fileNames.includes("Dockerfile") && !fileNames.includes("docker-compose.yml")) {
+      gotchas.push({ gotcha: "No docker-compose", detail: "Has Dockerfile but no docker-compose.yml — manual docker run required" });
+    }
+    // Dedupe gotchas by gotcha name
+    const seenGotchas = new Set();
+    const uniqueGotchas = gotchas.filter(g => {
+      if (seenGotchas.has(g.gotcha)) return false;
+      seenGotchas.add(g.gotcha);
+      return true;
+    });
+
+    // Build expertise YAML
+    const stackLine = detectedStack.length > 0 ? detectedStack.join(", ") : "unknown";
+    const expertiseLines = [
+      `# ${project} — expertise.yaml`,
+      `# Generated by rebar_quickstart on ${today}`,
+      "",
+      `app: ${project}`,
+      `last_updated: "${today}"`,
+      `status: discovered`,
+      `tagline: "Auto-discovered by rebar_quickstart"`,
+      "",
+      "architecture:",
+      `  stack: "${stackLine}"`,
+      `  # TODO: Fill in framework, database, hosting details`,
+      "",
+    ];
+
+    if (uniqueGotchas.length > 0) {
+      expertiseLines.push("api_gotchas:");
+      for (const g of uniqueGotchas) {
+        expertiseLines.push(`  - gotcha: "${g.gotcha}"`);
+        expertiseLines.push(`    detail: "${g.detail.replace(/"/g, '\\"')}"`);
+      }
+    } else {
+      expertiseLines.push("api_gotchas: []");
+    }
+
+    expertiseLines.push("");
+    expertiseLines.push("key_decisions: []");
+    expertiseLines.push("");
+    expertiseLines.push("known_issues: []");
+    expertiseLines.push("");
+    expertiseLines.push("implementation_patterns: {}");
+    expertiseLines.push("");
+    expertiseLines.push("unvalidated_observations:");
+    expertiseLines.push(`  - "rebar_quickstart initial scan on ${today}. Stack: ${stackLine}. ${analysis.length} files analyzed."`);
+    expertiseLines.push("");
+
+    // Only write if not already present (don't clobber existing expertise)
+    if (!fs.existsSync(expertisePath)) {
+      fs.writeFileSync(expertisePath, expertiseLines.join("\n"), "utf8");
+    }
+
+    // Create notes.md
+    const notesPath = path.join(projDir, "notes.md");
+    if (!fs.existsSync(notesPath)) {
+      fs.writeFileSync(notesPath, `# ${project} — Notes\n\n## ${today}: Quickstart Discovery\n\nRebar quickstart ran. Stack: ${stackLine}.\n`, "utf8");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. BRIEF — generate from the expertise we just created
+    // -----------------------------------------------------------------------
+    const expertiseData = parseExpertise(root, project);
+    const brief = generateBrief(expertiseData);
+
+    // -----------------------------------------------------------------------
+    // 4. GOTCHAS — extract from expertise + scan
+    // -----------------------------------------------------------------------
+    const gotchasSection = [];
+    if (uniqueGotchas.length > 0) {
+      gotchasSection.push("## Gotchas Detected");
+      gotchasSection.push("");
+      for (const g of uniqueGotchas) {
+        gotchasSection.push(`- **${g.gotcha}:** ${g.detail}`);
+      }
+    } else {
+      gotchasSection.push("## Gotchas");
+      gotchasSection.push("");
+      gotchasSection.push("No gotchas auto-detected. As you work with the codebase, use `rebar_observe` to record gotchas you discover.");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. SUGGESTED PLAN — based on what we found
+    // -----------------------------------------------------------------------
+    const dirCount = tree.filter(t => t.type === "dir").length;
+    const fileCount = tree.filter(t => t.type === "file").length;
+    const planSuggestions = [];
+    planSuggestions.push("## Suggested Next Steps");
+    planSuggestions.push("");
+    planSuggestions.push("Based on the codebase scan, here's a recommended plan:");
+    planSuggestions.push("");
+
+    let stepNum = 1;
+    planSuggestions.push(`${stepNum++}. **Review expertise.yaml** — Check \`apps/${project}/expertise.yaml\` and fill in architecture details, key decisions, and known issues.`);
+
+    if (uniqueGotchas.length > 0) {
+      planSuggestions.push(`${stepNum++}. **Address gotchas** — ${uniqueGotchas.length} gotcha(s) detected. Review each and document workarounds.`);
+    }
+
+    const hasTests = tree.some(t => t.path.match(/test|spec|__tests__/i));
+    if (!hasTests) {
+      planSuggestions.push(`${stepNum++}. **Add tests** — No test directory detected. Consider setting up a test framework.`);
+    }
+
+    const hasCI = analysis.some(a => a.file.includes("workflows") || a.file.includes("gitlab-ci") || a.file.includes("Jenkinsfile"));
+    if (!hasCI) {
+      planSuggestions.push(`${stepNum++}. **Set up CI/CD** — No CI configuration detected. Consider adding GitHub Actions or similar.`);
+    }
+
+    const hasDocs = tree.some(t => t.path.match(/^docs?\//i));
+    if (!hasDocs) {
+      planSuggestions.push(`${stepNum++}. **Add documentation** — No docs/ directory found. Start with architecture overview.`);
+    }
+
+    planSuggestions.push(`${stepNum++}. **Run rebar_improve** — Periodically validate observations against the live codebase.`);
+    planSuggestions.push(`${stepNum++}. **Use rebar_session_start** at the beginning of each session for warm context loading.`);
+
+    // Save plan skeleton to specs/
+    const planPath = path.join(projDir, "specs", "quickstart-plan.md");
+    if (!fs.existsSync(planPath)) {
+      const planContent = [
+        `# Quickstart Plan for ${project}`,
+        "",
+        `Created: ${today}`,
+        `Stack: ${stackLine}`,
+        "",
+        planSuggestions.slice(2).join("\n"), // skip header lines
+        "",
+        "## Files Scanned",
+        "",
+        `- ${analysis.length} key files analyzed`,
+        `- ${dirCount} directories, ${fileCount} files in tree`,
+        "",
+      ].join("\n");
+      fs.writeFileSync(planPath, planContent, "utf8");
+    }
+
+    // -----------------------------------------------------------------------
+    // Build the combined response
+    // -----------------------------------------------------------------------
+    const dirList = tree.filter(t => t.type === "dir").map(t => t.path + "/").join("\n");
+    const fileList = tree.filter(t => t.type === "file").map(t => t.path).slice(0, 50).join("\n");
+    const fileContents = analysis.slice(0, 6).map(a => `### ${a.file}\n\`\`\`\n${a.content.substring(0, 1500)}\n\`\`\``).join("\n\n");
+
+    const response = [
+      `# Rebar Quickstart: ${project}`,
+      "",
+      `**Stack:** ${stackLine}`,
+      `**Scanned:** ${analysis.length} key files | ${dirCount} dirs | ${fileCount} files`,
+      "",
+      "---",
+      "",
+      brief,
+      "",
+      "---",
+      "",
+      gotchasSection.join("\n"),
+      "",
+      "---",
+      "",
+      planSuggestions.join("\n"),
+      "",
+      "---",
+      "",
+      "## Codebase Scan",
+      "",
+      "### Directories",
+      "```",
+      dirList || "(empty)",
+      "```",
+      "",
+      "### Key Files",
+      "",
+      fileContents || "(no key files found)",
+      "",
+      "---",
+      "",
+      "## Files Created",
+      "",
+      `- \`apps/${project}/expertise.yaml\` — project expertise (edit to refine)`,
+      `- \`apps/${project}/notes.md\` — session notes`,
+      `- \`apps/${project}/specs/quickstart-plan.md\` — suggested plan`,
+      "",
+      "## What's Next",
+      "",
+      "You're set up. Use these tools to keep learning:",
+      "",
+      "| Tool | Purpose |",
+      "|------|---------|",
+      "| `rebar_observe` | Record facts and gotchas as you discover them |",
+      "| `rebar_improve` | Validate observations against live code |",
+      "| `rebar_brief_tool` | Quick project summary anytime |",
+      "| `rebar_session_start` | Warm start with full context |",
+      "| `rebar_plan` | Create implementation plans |",
+      "| `rebar_review` | Review code changes against expertise |",
+    ].join("\n");
+
+    return { content: [{ type: "text", text: response }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 async function main() {
