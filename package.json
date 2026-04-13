@@ -1,0 +1,28 @@
+{
+  "name": "rebar-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Rebar — serve project expertise to any AI editor",
+  "main": "index.js",
+  "bin": {
+    "rebar-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "mcp",
+    "rebar",
+    "ai",
+    "expertise",
+    "claude",
+    "cursor",
+    "windsurf",
+    "copilot"
+  ],
+  "author": "spotcircuit",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "js-yaml": "^4.1.0"
+  }
+}
